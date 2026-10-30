@@ -80,6 +80,10 @@ codeunit 13922 "ZUGFeRD XML Document Tests"
         SellerTaxRegistrationTok: Label '/rsm:CrossIndustryInvoice/rsm:SupplyChainTradeTransaction/ram:ApplicableHeaderTradeAgreement/ram:SellerTradeParty/ram:SpecifiedTaxRegistration/ram:ID', Locked = true;
         BuyerGlobalIdTok: Label '/rsm:CrossIndustryInvoice/rsm:SupplyChainTradeTransaction/ram:ApplicableHeaderTradeAgreement/ram:BuyerTradeParty/ram:GlobalID', Locked = true;
         ShipToGlobalIdTok: Label '/rsm:CrossIndustryInvoice/rsm:SupplyChainTradeTransaction/ram:ApplicableHeaderTradeDelivery/ram:ShipToTradeParty/ram:GlobalID', Locked = true;
+        GuidelineIDTok: Label '/rsm:CrossIndustryInvoice/rsm:ExchangedDocumentContext/ram:GuidelineSpecifiedDocumentContextParameter/ram:ID', Locked = true;
+        HeaderNoteTok: Label '/rsm:CrossIndustryInvoice/rsm:ExchangedDocument/ram:IncludedNote', Locked = true;
+        XRechnungGuidelineIDTok: Label 'urn:cen.eu:en16931:2017#compliant#urn:xeinkauf.de:kosit:xrechnung_3.0', Locked = true;
+        ExtendedGuidelineIDTok: Label 'urn:cen.eu:en16931:2017#conformant#urn:factur-x.eu:1p0:extended', Locked = true;
         IsInitialized: Boolean;
         OriginalCompanyGLN: Code[13];
         OriginalCompanyUsesGLN: Boolean;
@@ -5757,6 +5761,302 @@ codeunit 13922 "ZUGFeRD XML Document Tests"
         CompanyInformation.Modify();
     end;
 
+    #region ZUGFeRDProfile
+    [Test]
+    procedure ExportPostedSalesInvoiceInZUGFeRDXRechnungProfileKeepsXRechnungGuideline()
+    var
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] A ZUGFeRD service with the default profile XRechnung exports the XRechnung specification identifier (BT-24)
+        Initialize();
+
+        // [GIVEN] A posted sales invoice and a ZUGFeRD service with the default profile
+        SalesInvoiceHeader.Get(CreateAndPostSalesDocument("Sales Document Type"::Invoice, Enum::"Sales Line Type"::Item, false));
+        Assert.AreEqual("ZUGFeRD Profile"::XRechnung, EDocumentService."ZUGFeRD Profile", 'The default ZUGFeRD profile must be XRechnung');
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+
+        // [THEN] The XRechnung specification identifier is exported
+        Assert.AreEqual(XRechnungGuidelineIDTok, GetNodeByPathWithError(TempXMLBuffer, GuidelineIDTok), StrSubstNo(IncorrectValueErr, GuidelineIDTok));
+    end;
+
+    [Test]
+    procedure ExportPostedSalesInvoiceInZUGFeRDExtendedProfileWritesExtendedGuideline()
+    var
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] A ZUGFeRD service with the profile Extended exports the EXTENDED specification identifier (BT-24)
+        Initialize();
+
+        // [GIVEN] A posted sales invoice and a ZUGFeRD service with the profile Extended
+        SalesInvoiceHeader.Get(CreateAndPostSalesDocument("Sales Document Type"::Invoice, Enum::"Sales Line Type"::Item, false));
+        SetZUGFeRDProfile("ZUGFeRD Profile"::Extended);
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+
+        // [THEN] The EXTENDED specification identifier is exported
+        Assert.AreEqual(ExtendedGuidelineIDTok, GetNodeByPathWithError(TempXMLBuffer, GuidelineIDTok), StrSubstNo(IncorrectValueErr, GuidelineIDTok));
+    end;
+
+    [Test]
+    procedure ZUGFeRDExtendedProfileEmbedsFacturXFileName()
+    var
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        LocalExportZUGFeRDDocument: Codeunit "Export ZUGFeRD Document";
+        RenderingPayload: JsonObject;
+        RenderingPayloadText: Text;
+    begin
+        // [SCENARIO] The EXTENDED profile embeds the XML as factur-x.xml instead of xrechnung.xml (BR-HYBRID)
+        Initialize();
+
+        // [GIVEN] A posted sales invoice and a ZUGFeRD service with the profile Extended
+        SalesInvoiceHeader.Get(CreateAndPostSalesDocument("Sales Document Type"::Invoice, Enum::"Sales Line Type"::Item, false));
+        SetZUGFeRDProfile("ZUGFeRD Profile"::Extended);
+
+        // [WHEN] The XML is created and added to the rendering payload for the service
+        LocalExportZUGFeRDDocument.SetEDocumentService(EDocumentService);
+        LocalExportZUGFeRDDocument.CreateAndAddXMLAttachmentToRenderingPayload(SalesInvoiceHeader, RenderingPayload);
+
+        // [THEN] The attachment is named factur-x.xml
+        RenderingPayload.WriteTo(RenderingPayloadText);
+        Assert.IsTrue(RenderingPayloadText.Contains('factur-x.xml'), 'The EXTENDED profile must embed factur-x.xml');
+        Assert.IsFalse(RenderingPayloadText.Contains('xrechnung.xml'), 'The EXTENDED profile must not embed xrechnung.xml');
+    end;
+
+    [Test]
+    procedure ZUGFeRDProfileCanBeOverriddenPerDocument()
+    var
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] A subscriber of OnAfterResolveZUGFeRDProfile can export one document with the EXTENDED profile
+        Initialize();
+
+        // [GIVEN] A posted sales invoice, a ZUGFeRD service with the default profile and a subscriber that forces EXTENDED
+        SalesInvoiceHeader.Get(CreateAndPostSalesDocument("Sales Document Type"::Invoice, Enum::"Sales Line Type"::Item, false));
+        LibraryEDocDE.ForceZUGFeRDExtendedProfile();
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        BindSubscription(LibraryEDocDE);
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+        UnbindSubscription(LibraryEDocDE);
+
+        // [THEN] The EXTENDED specification identifier is exported
+        Assert.AreEqual(ExtendedGuidelineIDTok, GetNodeByPathWithError(TempXMLBuffer, GuidelineIDTok), StrSubstNo(IncorrectValueErr, GuidelineIDTok));
+    end;
+
+    [Test]
+    procedure ExportPostedSalesInvoiceInZUGFeRDExtendedProfileWithSubLines()
+    var
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        SalesInvoiceLine: Record "Sales Invoice Line";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+        UsedPartAmount: Decimal;
+        UsedPartAmountInclVAT: Decimal;
+        DespatchAdviceNo: Code[20];
+    begin
+        // [SCENARIO] Automotive invoice in the EXTENDED profile: header notes, sub-lines, an additional old-part value line,
+        // the old-part value as paid amount and a despatch advice reference, all from event subscribers
+        Initialize();
+
+        // [GIVEN] A posted sales invoice with two lines and a ZUGFeRD service with the profile Extended
+        SalesInvoiceHeader.Get(CreateAndPostSalesDocumentWithTwoLines("Sales Document Type"::Invoice, Enum::"Sales Line Type"::Item, false));
+        SetZUGFeRDProfile("ZUGFeRD Profile"::Extended);
+        SalesInvoiceLine.SetRange("Document No.", SalesInvoiceHeader."No.");
+        SalesInvoiceLine.FindFirst();
+
+        // [GIVEN] Subscribers that add the notes ADU and REG, put the second line and an old-part value line of 100 under the first line,
+        // set the old-part value as paid amount and add a despatch advice reference
+        UsedPartAmount := 100;
+        DespatchAdviceNo := LibraryUtility.GenerateGUID();
+        LibraryEDocDE.EnableZUGFeRDSubLineScenario(UsedPartAmount, GetAdditionalLineNo(), DespatchAdviceNo);
+        UsedPartAmountInclVAT := LibraryEDocDE.GetUsedPartAmountIncludingVAT(SalesInvoiceLine."VAT %");
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        BindSubscription(LibraryEDocDE);
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+        UnbindSubscription(LibraryEDocDE);
+
+        // [THEN] The notes, sub-lines, additional line, totals and despatch advice are exported
+        SalesInvoiceHeader.CalcFields(Amount, "Amount Including VAT");
+        VerifySubLineScenario(TempXMLBuffer, SalesInvoiceLine."Line No.", SalesInvoiceHeader.Amount, SalesInvoiceHeader."Amount Including VAT", UsedPartAmount, UsedPartAmountInclVAT, DespatchAdviceNo);
+    end;
+
+    [Test]
+    procedure ExportPostedSalesCrMemoInZUGFeRDExtendedProfileWithSubLines()
+    var
+        SalesCrMemoHeader: Record "Sales Cr.Memo Header";
+        SalesCrMemoLine: Record "Sales Cr.Memo Line";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+        UsedPartAmount: Decimal;
+        UsedPartAmountInclVAT: Decimal;
+        DespatchAdviceNo: Code[20];
+    begin
+        // [SCENARIO] Automotive credit memo in the EXTENDED profile: the same events work for credit memos
+        Initialize();
+
+        // [GIVEN] A posted sales credit memo with two lines and a ZUGFeRD service with the profile Extended
+        SalesCrMemoHeader.Get(CreateAndPostSalesDocumentWithTwoLines("Sales Document Type"::"Credit Memo", Enum::"Sales Line Type"::Item, false));
+        SetZUGFeRDProfile("ZUGFeRD Profile"::Extended);
+        SalesCrMemoLine.SetRange("Document No.", SalesCrMemoHeader."No.");
+        SalesCrMemoLine.FindFirst();
+
+        // [GIVEN] The automotive subscribers
+        UsedPartAmount := 100;
+        DespatchAdviceNo := LibraryUtility.GenerateGUID();
+        LibraryEDocDE.EnableZUGFeRDSubLineScenario(UsedPartAmount, GetAdditionalLineNo(), DespatchAdviceNo);
+        UsedPartAmountInclVAT := LibraryEDocDE.GetUsedPartAmountIncludingVAT(SalesCrMemoLine."VAT %");
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        BindSubscription(LibraryEDocDE);
+        ExportCreditMemo(SalesCrMemoHeader, TempXMLBuffer);
+        UnbindSubscription(LibraryEDocDE);
+
+        // [THEN] The notes, sub-lines, additional line, totals and despatch advice are exported
+        SalesCrMemoHeader.CalcFields(Amount, "Amount Including VAT");
+        VerifySubLineScenario(TempXMLBuffer, SalesCrMemoLine."Line No.", SalesCrMemoHeader.Amount, SalesCrMemoHeader."Amount Including VAT", UsedPartAmount, UsedPartAmountInclVAT, DespatchAdviceNo);
+    end;
+
+    [Test]
+    procedure ExportPostedSalesInvoiceInZUGFeRDXRechnungProfileOmitsSubLineElements()
+    var
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] Parent line and sub-line type exist only in EXTENDED: the XRechnung profile ignores them, the other event data is still exported
+        Initialize();
+
+        // [GIVEN] A posted sales invoice with two lines and a ZUGFeRD service with the default profile
+        SalesInvoiceHeader.Get(CreateAndPostSalesDocumentWithTwoLines("Sales Document Type"::Invoice, Enum::"Sales Line Type"::Item, false));
+        LibraryEDocDE.EnableZUGFeRDSubLineScenario(100, GetAdditionalLineNo(), LibraryUtility.GenerateGUID());
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        BindSubscription(LibraryEDocDE);
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+        UnbindSubscription(LibraryEDocDE);
+
+        // [THEN] No parent line and no sub-line type are exported
+        VerifyNodeDoesNotExist(TempXMLBuffer, InvoiceLineTok + '/ram:AssociatedDocumentLineDocument/ram:ParentLineID');
+        VerifyNodeDoesNotExist(TempXMLBuffer, InvoiceLineTok + '/ram:AssociatedDocumentLineDocument/ram:LineStatusReasonCode');
+        // [THEN] The additional line and the notes are exported
+        Assert.AreEqual(3, CountNodesByPath(TempXMLBuffer, InvoiceLineTok), 'The additional line must be exported');
+        Assert.AreEqual(2, CountNodesByPath(TempXMLBuffer, HeaderNoteTok), 'The notes must be exported');
+    end;
+
+    [Test]
+    procedure ExportPostedSalesInvoiceInZUGFeRDFormatWithOwnLineIDs()
+    var
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        SalesInvoiceLine: Record "Sales Invoice Line";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] A subscriber can replace the line ID (BT-126), for example with an own position numbering
+        Initialize();
+
+        // [GIVEN] A posted sales invoice and a subscriber that prefixes every line ID with 'POS-'
+        SalesInvoiceHeader.Get(CreateAndPostSalesDocument("Sales Document Type"::Invoice, Enum::"Sales Line Type"::Item, false));
+        LibraryEDocDE.SetZUGFeRDLineIDPrefix('POS-');
+        SalesInvoiceLine.SetRange("Document No.", SalesInvoiceHeader."No.");
+        SalesInvoiceLine.FindFirst();
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        BindSubscription(LibraryEDocDE);
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+        UnbindSubscription(LibraryEDocDE);
+
+        // [THEN] The line ID is the one of the subscriber
+        Assert.AreEqual('POS-' + Format(SalesInvoiceLine."Line No."), GetNodeByPathWithError(TempXMLBuffer, InvoiceLineTok + '/ram:AssociatedDocumentLineDocument/ram:LineID'), 'Line ID');
+    end;
+
+    [Test]
+    procedure ExportZUGFeRDWithAdditionalLineThatReusesALineNoFails()
+    var
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        SalesInvoiceLine: Record "Sales Invoice Line";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] An additional line must not reuse the line number of a document line
+        Initialize();
+
+        // [GIVEN] A posted sales invoice and a subscriber that adds a line with the line number of the first document line
+        SalesInvoiceHeader.Get(CreateAndPostSalesDocument("Sales Document Type"::Invoice, Enum::"Sales Line Type"::Item, false));
+        SalesInvoiceLine.SetRange("Document No.", SalesInvoiceHeader."No.");
+        SalesInvoiceLine.FindFirst();
+        LibraryEDocDE.EnableZUGFeRDSubLineScenario(100, SalesInvoiceLine."Line No.", LibraryUtility.GenerateGUID());
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        BindSubscription(LibraryEDocDE);
+        asserterror ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+        UnbindSubscription(LibraryEDocDE);
+
+        // [THEN] The export fails with an error about the line number
+        Assert.ExpectedError('uses a line number that the document already has');
+    end;
+
+    local procedure VerifySubLineScenario(var TempXMLBuffer: Record "XML Buffer" temporary; FirstLineNo: Integer; DocumentAmount: Decimal; DocumentAmountInclVAT: Decimal; UsedPartAmount: Decimal; UsedPartAmountInclVAT: Decimal; DespatchAdviceNo: Code[20])
+    var
+        GrandTotalAmount: Decimal;
+        Path: Text;
+    begin
+        // Notes ADU and REG in the document header
+        Assert.AreEqual(2, CountNodesByPath(TempXMLBuffer, HeaderNoteTok), 'Number of header notes');
+        Assert.AreEqual(LibraryEDocDE.GetZUGFeRDUsedPartNote(), GetNodeByPathWithError(TempXMLBuffer, HeaderNoteTok + '/ram:Content'), 'ADU note content');
+        Assert.AreEqual('ADU', GetNodeByPathWithError(TempXMLBuffer, HeaderNoteTok + '/ram:SubjectCode'), 'ADU note subject code');
+        Assert.AreEqual(LibraryEDocDE.GetZUGFeRDRegisterNote(), GetLastNodeByPathWithError(TempXMLBuffer, HeaderNoteTok + '/ram:Content'), 'REG note content');
+        Assert.AreEqual('REG', GetLastNodeByPathWithError(TempXMLBuffer, HeaderNoteTok + '/ram:SubjectCode'), 'REG note subject code');
+
+        // Two document lines and the additional line; the second line and the additional line are DETAIL sub-lines of the first line
+        Assert.AreEqual(3, CountNodesByPath(TempXMLBuffer, InvoiceLineTok), 'Number of lines');
+        Path := InvoiceLineTok + '/ram:AssociatedDocumentLineDocument/ram:ParentLineID';
+        Assert.AreEqual(2, CountNodesByPath(TempXMLBuffer, Path), 'Number of sub-lines');
+        Assert.AreEqual(Format(FirstLineNo), GetNodeByPathWithError(TempXMLBuffer, Path), StrSubstNo(IncorrectValueErr, Path));
+        Assert.AreEqual(Format(FirstLineNo), GetLastNodeByPathWithError(TempXMLBuffer, Path), StrSubstNo(IncorrectValueErr, Path));
+        Path := InvoiceLineTok + '/ram:AssociatedDocumentLineDocument/ram:LineStatusReasonCode';
+        Assert.AreEqual(2, CountNodesByPath(TempXMLBuffer, Path), 'Number of sub-line types');
+        Assert.AreEqual('DETAIL', GetNodeByPathWithError(TempXMLBuffer, Path), StrSubstNo(IncorrectValueErr, Path));
+        Assert.AreEqual('DETAIL', GetLastNodeByPathWithError(TempXMLBuffer, Path), StrSubstNo(IncorrectValueErr, Path));
+        Path := InvoiceLineTok + '/ram:AssociatedDocumentLineDocument/ram:LineID';
+        Assert.AreEqual(Format(GetAdditionalLineNo()), GetLastNodeByPathWithError(TempXMLBuffer, Path), StrSubstNo(IncorrectValueErr, Path));
+        Path := LineMonetarySummationTok + '/ram:LineTotalAmount';
+        Assert.AreEqual(ExportZUGFeRDDocument.FormatDecimal(UsedPartAmount), GetLastNodeByPathWithError(TempXMLBuffer, Path), StrSubstNo(IncorrectValueErr, Path));
+
+        // The additional line counts for the totals, the old-part value is paid and not due (BR-CO-16)
+        GrandTotalAmount := DocumentAmountInclVAT + UsedPartAmountInclVAT;
+        Path := MonetarySummationTok + '/ram:LineTotalAmount';
+        Assert.AreEqual(ExportZUGFeRDDocument.FormatDecimal(DocumentAmount + UsedPartAmount), GetNodeByPathWithError(TempXMLBuffer, Path), StrSubstNo(IncorrectValueErr, Path));
+        Path := MonetarySummationTok + '/ram:TaxBasisTotalAmount';
+        Assert.AreEqual(ExportZUGFeRDDocument.FormatDecimal(DocumentAmount + UsedPartAmount), GetNodeByPathWithError(TempXMLBuffer, Path), StrSubstNo(IncorrectValueErr, Path));
+        Path := MonetarySummationTok + '/ram:GrandTotalAmount';
+        Assert.AreEqual(ExportZUGFeRDDocument.FormatDecimal(GrandTotalAmount), GetNodeByPathWithError(TempXMLBuffer, Path), StrSubstNo(IncorrectValueErr, Path));
+        Path := MonetarySummationTok + '/ram:TotalPrepaidAmount';
+        Assert.AreEqual(ExportZUGFeRDDocument.FormatDecimal(UsedPartAmount), GetNodeByPathWithError(TempXMLBuffer, Path), StrSubstNo(IncorrectValueErr, Path));
+        Path := MonetarySummationTok + '/ram:DuePayableAmount';
+        Assert.AreEqual(ExportZUGFeRDDocument.FormatDecimal(GrandTotalAmount - UsedPartAmount), GetNodeByPathWithError(TempXMLBuffer, Path), StrSubstNo(IncorrectValueErr, Path));
+
+        // The despatch advice reference follows the actual delivery date in the delivery block
+        Path := '/rsm:CrossIndustryInvoice/rsm:SupplyChainTradeTransaction/ram:ApplicableHeaderTradeDelivery/ram:DespatchAdviceReferencedDocument/ram:IssuerAssignedID';
+        Assert.AreEqual(DespatchAdviceNo, GetNodeByPathWithError(TempXMLBuffer, Path), StrSubstNo(IncorrectValueErr, Path));
+    end;
+
+    local procedure GetAdditionalLineNo(): Integer
+    begin
+        // Above the line numbers of the test documents, so that it is never used by a document line.
+        exit(999000);
+    end;
+
+    local procedure SetZUGFeRDProfile(ZUGFeRDProfile: Enum "ZUGFeRD Profile")
+    begin
+        if EDocumentService."ZUGFeRD Profile" = ZUGFeRDProfile then
+            exit;
+        EDocumentService."ZUGFeRD Profile" := ZUGFeRDProfile;
+        EDocumentService.Modify();
+    end;
+    #endregion
+
     local procedure Initialize();
     begin
         LibraryTestInitialize.OnTestInitialize(Codeunit::"ZUGFeRD XML Document Tests");
@@ -5766,6 +6066,8 @@ codeunit 13922 "ZUGFeRD XML Document Tests"
             // from the single-service fixture regardless of a previous failure.
             RemoveTrailingZUGFeRDServices();
             RestoreCompanyIdentifiers();
+            SetZUGFeRDProfile("ZUGFeRD Profile"::XRechnung);
+            LibraryEDocDE.ResetZUGFeRDScenario();
             exit;
         end;
         LibraryTestInitialize.OnBeforeTestSuiteInitialize(Codeunit::"ZUGFeRD XML Document Tests");
