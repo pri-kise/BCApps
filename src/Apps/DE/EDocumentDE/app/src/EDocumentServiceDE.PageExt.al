@@ -29,6 +29,11 @@ pageextension 13915 "E-Document Service DE" extends "E-Document Service"
                 {
                     ApplicationArea = All;
                 }
+                field("ZUGFeRD Profile"; Rec."ZUGFeRD Profile")
+                {
+                    ApplicationArea = All;
+                    Visible = IsZUGFeRDProfileVisible;
+                }
 #if not CLEAN29
                 field("Buyer Reference"; Rec."Buyer Reference")
                 {
@@ -59,7 +64,8 @@ pageextension 13915 "E-Document Service DE" extends "E-Document Service"
 
             trigger OnAfterValidate()
             begin
-                IsParameterVisible := Rec."Document Format" in [Rec."Document Format"::"PEPPOL BIS 3.0 DE", Rec."Document Format"::XRechnung, Rec."Document Format"::ZUGFeRD]
+                IsParameterVisible := Rec."Document Format" in [Rec."Document Format"::"PEPPOL BIS 3.0 DE", Rec."Document Format"::XRechnung, Rec."Document Format"::ZUGFeRD];
+                IsZUGFeRDProfileVisible := Rec."Document Format" = Rec."Document Format"::ZUGFeRD;
             end;
         }
 
@@ -72,8 +78,10 @@ pageextension 13915 "E-Document Service DE" extends "E-Document Service"
     trigger OnAfterGetCurrRecord()
     begin
         IsParameterVisible := Rec."Document Format" in [Rec."Document Format"::"PEPPOL BIS 3.0 DE", Rec."Document Format"::XRechnung, Rec."Document Format"::ZUGFeRD];
+        IsZUGFeRDProfileVisible := Rec."Document Format" = Rec."Document Format"::ZUGFeRD;
     end;
 
     var
         IsParameterVisible: Boolean;
+        IsZUGFeRDProfileVisible: Boolean;
 }

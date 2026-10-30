@@ -37,6 +37,8 @@ codeunit 13917 "Export ZUGFeRD Document"
         CompanyInformation: Record "Company Information";
         GeneralLedgerSetup: Record "General Ledger Setup";
         EDocumentService: Record "E-Document Service";
+        TempAdditionalSalesInvLine: Record "Sales Invoice Line" temporary;
+        TempAdditionalSalesCrMemoLine: Record "Sales Cr.Memo Line" temporary;
         FeatureTelemetry: Codeunit "Feature Telemetry";
         PeppolVATHelper: Codeunit "PEPPOL VAT Helper";
         EDocumentDEHelper: Codeunit "E-Document DE Helper";
@@ -58,6 +60,15 @@ codeunit 13917 "Export ZUGFeRD Document"
         EDocumentServiceProvided: Boolean;
 #endif
         DocumentLanguageCode: Code[10];
+        CurrentZUGFeRDProfile: Enum "ZUGFeRD Profile";
+        XRechnungGuidelineIDTok: Label 'urn:cen.eu:en16931:2017#compliant#urn:xeinkauf.de:kosit:xrechnung_3.0', Locked = true;
+        ExtendedGuidelineIDTok: Label 'urn:cen.eu:en16931:2017#conformant#urn:factur-x.eu:1p0:extended', Locked = true;
+        XRechnungAttachmentNameTok: Label 'xrechnung.xml', Locked = true;
+        FacturXAttachmentNameTok: Label 'factur-x.xml', Locked = true;
+        LineSubtypeDetailTok: Label 'DETAIL', Locked = true;
+        LineSubtypeGroupTok: Label 'GROUP', Locked = true;
+        LineSubtypeInformationTok: Label 'INFORMATION', Locked = true;
+        AdditionalLineNoExistsErr: Label 'The additional line %1 for the ZUGFeRD export uses a line number that the document already has. Use a line number that no line of the document uses.', Comment = '%1 = Line No.';
 
     trigger OnRun()
     var
@@ -162,7 +173,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         DescriptionLbl: Label 'This is the e-invoicing xml document';
     begin
         PDFDocument.Initialize();
-        Name := 'xrechnung.xml';
+        Name := GetXMLAttachmentName();
         DataType := Enum::"PDF Attach. Data Relationship"::Alternative;
         MimeType := 'text/xml';
         Description := DescriptionLbl;
@@ -302,12 +313,15 @@ codeunit 13917 "Export ZUGFeRD Document"
         FindEDocumentService();
 #pragma warning restore AL0432
 #endif
+        ClearAdditionalLines();
         if not DocumentLinesExist(SalesInvoiceHeader, SalesInvLine) then
             exit;
 
         DocumentLanguageCode := SalesInvoiceHeader."Language Code";
         SourceDocumentRecordRef.Close();
         SourceDocumentRecordRef.GetTable(SalesInvoiceHeader);
+        CurrentZUGFeRDProfile := ResolveZUGFeRDProfile(EDocumentService, SourceDocumentRecordRef);
+        CollectAdditionalLines(SalesInvLine);
         XmlDocument.ReadFrom(GetInvoiceXMLHeader(), XMLDoc);
         XmlDoc.GetRoot(RootXMLNode);
 
@@ -323,6 +337,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         FileOutstream.WriteText(XMLDocText);
         Clear(XMLDoc);
         SourceDocumentRecordRef.Close();
+        ClearAdditionalLines();
     end;
 
     procedure CreateXML(SalesCrMemoHeader: Record "Sales Cr.Memo Header"; var FileOutstream: Outstream)
@@ -345,12 +360,15 @@ codeunit 13917 "Export ZUGFeRD Document"
         FindEDocumentService();
 #pragma warning restore AL0432
 #endif
+        ClearAdditionalLines();
         if not DocumentLinesExist(SalesCrMemoHeader, SalesCrMemoLine) then
             exit;
 
         DocumentLanguageCode := SalesCrMemoHeader."Language Code";
         SourceDocumentRecordRef.Close();
         SourceDocumentRecordRef.GetTable(SalesCrMemoHeader);
+        CurrentZUGFeRDProfile := ResolveZUGFeRDProfile(EDocumentService, SourceDocumentRecordRef);
+        CollectAdditionalLines(SalesCrMemoLine);
         XmlDocument.ReadFrom(GetInvoiceXMLHeader(), XMLDoc);
         XmlDoc.GetRoot(RootXMLNode);
 
@@ -366,6 +384,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         FileOutstream.WriteText(XMLDocText);
         Clear(XMLDoc);
         SourceDocumentRecordRef.Close();
+        ClearAdditionalLines();
     end;
 
     procedure CreateXML(ServiceInvoiceHeader: Record "Service Invoice Header"; var FileOutstream: Outstream)
@@ -391,6 +410,7 @@ codeunit 13917 "Export ZUGFeRD Document"
 #pragma warning restore AL0432
 #endif
         ClearItemChargeClassification();
+        ClearAdditionalLines();
         TransferToSalesInvoiceHeader(ServiceInvoiceHeader, SalesInvoiceHeader);
         SalesInvoiceHeader."Company Bank Account Code" := ServiceInvoiceHeader."Company Bank Account Code";
         ServiceInvoiceLine.SetRange("Document No.", ServiceInvoiceHeader."No.");
@@ -405,6 +425,8 @@ codeunit 13917 "Export ZUGFeRD Document"
         DocumentLanguageCode := SalesInvoiceHeader."Language Code";
         SourceDocumentRecordRef.Close();
         SourceDocumentRecordRef.GetTable(ServiceInvoiceHeader);
+        CurrentZUGFeRDProfile := ResolveZUGFeRDProfile(EDocumentService, SourceDocumentRecordRef);
+        CollectAdditionalLines(TempSalesInvLine);
         XmlDocument.ReadFrom(GetInvoiceXMLHeader(), XMLDoc);
         XmlDoc.GetRoot(RootXMLNode);
 
@@ -419,6 +441,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         FileOutstream.WriteText(XMLDocText);
         Clear(XMLDoc);
         SourceDocumentRecordRef.Close();
+        ClearAdditionalLines();
     end;
 
     procedure CreateXML(ServiceCrMemoHeader: Record "Service Cr.Memo Header"; var FileOutstream: Outstream)
@@ -444,6 +467,7 @@ codeunit 13917 "Export ZUGFeRD Document"
 #pragma warning restore AL0432
 #endif
         ClearItemChargeClassification();
+        ClearAdditionalLines();
         TransferToSalesCrMemoHeader(ServiceCrMemoHeader, SalesCrMemoHeader);
         SalesCrMemoHeader."Company Bank Account Code" := ServiceCrMemoHeader."Company Bank Account Code";
         ServiceCrMemoLine.SetRange("Document No.", ServiceCrMemoHeader."No.");
@@ -458,6 +482,8 @@ codeunit 13917 "Export ZUGFeRD Document"
         DocumentLanguageCode := SalesCrMemoHeader."Language Code";
         SourceDocumentRecordRef.Close();
         SourceDocumentRecordRef.GetTable(ServiceCrMemoHeader);
+        CurrentZUGFeRDProfile := ResolveZUGFeRDProfile(EDocumentService, SourceDocumentRecordRef);
+        CollectAdditionalLines(TempSalesCrMemoLine);
         XmlDocument.ReadFrom(GetInvoiceXMLHeader(), XMLDoc);
         XmlDoc.GetRoot(RootXMLNode);
 
@@ -472,6 +498,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         FileOutstream.WriteText(XMLDocText);
         Clear(XMLDoc);
         SourceDocumentRecordRef.Close();
+        ClearAdditionalLines();
     end;
 
     local procedure DocumentLinesExist(SalesInvoiceHeader: Record "Sales Invoice Header"; var SalesInvLine: Record "Sales Invoice Line"): Boolean
@@ -525,7 +552,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         ExchangedDocumentContextElement.Add(BusinessProcessContextElement);
 
         GuidelineSpecifiedDocumentContextParameterElement := XmlElement.Create('GuidelineSpecifiedDocumentContextParameter', XmlNamespaceRAM);
-        GuidelineSpecifiedDocumentContextParameterElement.Add(XmlElement.Create('ID', XmlNamespaceRAM, 'urn:cen.eu:en16931:2017#compliant#urn:xeinkauf.de:kosit:xrechnung_3.0'));
+        GuidelineSpecifiedDocumentContextParameterElement.Add(XmlElement.Create('ID', XmlNamespaceRAM, GetGuidelineID()));
         ExchangedDocumentContextElement.Add(GuidelineSpecifiedDocumentContextParameterElement);
         RootXMLNode.Add(ExchangedDocumentContextElement);
         ExchangedDocumentElement := XmlElement.Create('ExchangedDocument', XmlNamespaceRSM);
@@ -535,6 +562,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         IssueDateTimeElement := XmlElement.Create('IssueDateTime', XmlNamespaceRAM);
         IssueDateTimeElement.Add(XmlElement.Create('DateTimeString', XmlNamespaceUDT, XmlAttribute.Create('format', '102'), FormatDate(SalesInvoiceHeader."Document Date")));
         ExchangedDocumentElement.Add(IssueDateTimeElement);
+        InsertHeaderNotes(ExchangedDocumentElement, SalesInvoiceHeader);
         RootXMLNode.Add(ExchangedDocumentElement);
         OnAfterInsertSalesInvHeaderData(RootXMLNode, SalesInvoiceHeader);
     end;
@@ -549,7 +577,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         ExchangedDocumentContextElement.Add(BusinessProcessContextElement);
 
         GuidelineSpecifiedDocumentContextParameterElement := XmlElement.Create('GuidelineSpecifiedDocumentContextParameter', XmlNamespaceRAM);
-        GuidelineSpecifiedDocumentContextParameterElement.Add(XmlElement.Create('ID', XmlNamespaceRAM, 'urn:cen.eu:en16931:2017#compliant#urn:xeinkauf.de:kosit:xrechnung_3.0'));
+        GuidelineSpecifiedDocumentContextParameterElement.Add(XmlElement.Create('ID', XmlNamespaceRAM, GetGuidelineID()));
         ExchangedDocumentContextElement.Add(GuidelineSpecifiedDocumentContextParameterElement);
         RootXMLNode.Add(ExchangedDocumentContextElement);
         ExchangedDocumentElement := XmlElement.Create('ExchangedDocument', XmlNamespaceRSM);
@@ -559,6 +587,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         IssueDateTimeElement := XmlElement.Create('IssueDateTime', XmlNamespaceRAM);
         IssueDateTimeElement.Add(XmlElement.Create('DateTimeString', XmlNamespaceUDT, XmlAttribute.Create('format', '102'), FormatDate(SalesCrMemoHeader."Document Date")));
         ExchangedDocumentElement.Add(IssueDateTimeElement);
+        InsertHeaderNotes(ExchangedDocumentElement, SalesCrMemoHeader);
         RootXMLNode.Add(ExchangedDocumentElement);
         OnAfterInsertSalesCrMemoHeaderData(RootXMLNode, SalesCrMemoHeader);
     end;
@@ -795,6 +824,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         ActualDeliveryDateElement.Add(OccurrenceDateTimeElement);
         DeliveryElement.Add(ActualDeliveryDateElement);
 
+        RaiseOnAfterInsertApplicableHeaderTradeDelivery(DeliveryElement, SalesInvoiceHeader);
         RootXMLNode.Add(DeliveryElement);
     end;
 
@@ -823,6 +853,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         ActualDeliveryDateElement.Add(OccurrenceDateTimeElement);
         DeliveryElement.Add(ActualDeliveryDateElement);
 
+        RaiseOnAfterInsertApplicableHeaderTradeDelivery(DeliveryElement, SalesCrMemoHeader);
         RootXMLNode.Add(DeliveryElement);
     end;
 
@@ -851,6 +882,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         SettlementElement, MonetarySummationElement : XmlElement;
         ItemChargeTotalAmount: Decimal;
         ItemChargeAllowanceTotalAmount: Decimal;
+        PrepaidAmount: Decimal;
     begin
         SettlementElement := XmlElement.Create('ApplicableHeaderTradeSettlement', XmlNamespaceRAM);
         // BT-90 Bank assigned creditor identifier. The CII HeaderTradeSettlement sequence puts
@@ -873,8 +905,9 @@ codeunit 13917 "Export ZUGFeRD Document"
         MonetarySummationElement.Add(XmlElement.Create('TaxBasisTotalAmount', XmlNamespaceRAM, FormatDecimal(LineAmounts.Get(SalesInvLine.FieldName(Amount)))));
         MonetarySummationElement.Add(XmlElement.Create('TaxTotalAmount', XmlNamespaceRAM, XmlAttribute.Create('currencyID', CurrencyCode), FormatDecimal(LineAmounts.Get(SalesInvLine.FieldName("Amount Including VAT")) - LineAmounts.Get(SalesInvLine.FieldName(Amount)))));
         MonetarySummationElement.Add(XmlElement.Create('GrandTotalAmount', XmlNamespaceRAM, FormatDecimal(LineAmounts.Get(SalesInvLine.FieldName("Amount Including VAT")))));
-        MonetarySummationElement.Add(XmlElement.Create('TotalPrepaidAmount', XmlNamespaceRAM, FormatDecimal(0)));
-        MonetarySummationElement.Add(XmlElement.Create('DuePayableAmount', XmlNamespaceRAM, FormatDecimal(LineAmounts.Get(SalesInvLine.FieldName("Amount Including VAT")))));
+        PrepaidAmount := GetPrepaidAmount(SalesInvHeader);
+        MonetarySummationElement.Add(XmlElement.Create('TotalPrepaidAmount', XmlNamespaceRAM, FormatDecimal(PrepaidAmount)));
+        MonetarySummationElement.Add(XmlElement.Create('DuePayableAmount', XmlNamespaceRAM, FormatDecimal(LineAmounts.Get(SalesInvLine.FieldName("Amount Including VAT")) - PrepaidAmount)));
 
         SettlementElement.Add(MonetarySummationElement);
         RootXMLNode.Add(SettlementElement);
@@ -885,6 +918,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         SettlementElement, MonetarySummationElement : XmlElement;
         ItemChargeTotalAmount: Decimal;
         ItemChargeAllowanceTotalAmount: Decimal;
+        PrepaidAmount: Decimal;
     begin
         SettlementElement := XmlElement.Create('ApplicableHeaderTradeSettlement', XmlNamespaceRAM);
 
@@ -904,8 +938,9 @@ codeunit 13917 "Export ZUGFeRD Document"
         MonetarySummationElement.Add(XmlElement.Create('TaxBasisTotalAmount', XmlNamespaceRAM, FormatDecimal(LineAmounts.Get(SalesCrMemoLine.FieldName(Amount)))));
         MonetarySummationElement.Add(XmlElement.Create('TaxTotalAmount', XmlNamespaceRAM, XmlAttribute.Create('currencyID', CurrencyCode), FormatDecimal(LineAmounts.Get(SalesCrMemoLine.FieldName("Amount Including VAT")) - LineAmounts.Get(SalesCrMemoLine.FieldName(Amount)))));
         MonetarySummationElement.Add(XmlElement.Create('GrandTotalAmount', XmlNamespaceRAM, FormatDecimal(LineAmounts.Get(SalesCrMemoLine.FieldName("Amount Including VAT")))));
-        MonetarySummationElement.Add(XmlElement.Create('TotalPrepaidAmount', XmlNamespaceRAM, FormatDecimal(0)));
-        MonetarySummationElement.Add(XmlElement.Create('DuePayableAmount', XmlNamespaceRAM, FormatDecimal(LineAmounts.Get(SalesCrMemoLine.FieldName("Amount Including VAT")))));
+        PrepaidAmount := GetPrepaidAmount(SalesCrMemoHeader);
+        MonetarySummationElement.Add(XmlElement.Create('TotalPrepaidAmount', XmlNamespaceRAM, FormatDecimal(PrepaidAmount)));
+        MonetarySummationElement.Add(XmlElement.Create('DuePayableAmount', XmlNamespaceRAM, FormatDecimal(LineAmounts.Get(SalesCrMemoLine.FieldName("Amount Including VAT")) - PrepaidAmount)));
 
         SettlementElement.Add(MonetarySummationElement);
         RootXMLNode.Add(SettlementElement);
@@ -935,46 +970,67 @@ codeunit 13917 "Export ZUGFeRD Document"
     end;
 
     local procedure InsertTradeTax(var SettlementElement: XmlElement; var SalesInvLine: Record "Sales Invoice Line"; var LineAmount: Dictionary of [Decimal, Decimal]; var LineVATAmount: Dictionary of [Decimal, Decimal])
-    var
-        VATEXCode: Text;
-        VATClauseDescription: Text;
     begin
         if SalesInvLine.FindSet() then
             repeat
-                if LineVATAmount.ContainsKey(SalesInvLine."VAT %") and LineAmount.ContainsKey(SalesInvLine."VAT %") then begin
-                    PeppolVATHelper.GetVATClauseInfo(SalesInvLine."VAT Bus. Posting Group", SalesInvLine."VAT Prod. Posting Group", DocumentLanguageCode, VATEXCode, VATClauseDescription);
-                    InsertTaxElement(SettlementElement, FormatDecimal(LineVATAmount.Get(SalesInvLine."VAT %")), FormatDecimal(LineAmount.Get(SalesInvLine."VAT %")),
-                        GetTaxCategoryID(SalesInvLine."Tax Category", SalesInvLine."VAT Bus. Posting Group", SalesInvLine."VAT Prod. Posting Group"), FormatFiveDecimal(SalesInvLine."VAT %"),
-                        VATEXCode, VATClauseDescription);
-                    LineAmount.Remove(SalesInvLine."VAT %");
-                    LineVATAmount.Remove(SalesInvLine."VAT %");
-                end;
+                InsertTradeTaxForLine(SettlementElement, SalesInvLine, LineAmount, LineVATAmount);
             until SalesInvLine.Next() = 0;
+        // Additional lines run last, so that a VAT rate that only an additional line has still gets its breakdown.
+        TempAdditionalSalesInvLine.Reset();
+        if TempAdditionalSalesInvLine.FindSet() then
+            repeat
+                InsertTradeTaxForLine(SettlementElement, TempAdditionalSalesInvLine, LineAmount, LineVATAmount);
+            until TempAdditionalSalesInvLine.Next() = 0;
 
         SalesInvLine.SetRange("VAT %");
         SalesInvLine.SetRange("VAT Calculation Type");
     end;
 
-    local procedure InsertTradeTax(var SettlementElement: XmlElement; var SalesCrMemoLine: Record "Sales Cr.Memo Line"; var LineAmount: Dictionary of [Decimal, Decimal]; var LineVATAmount: Dictionary of [Decimal, Decimal])
+    local procedure InsertTradeTaxForLine(var SettlementElement: XmlElement; SalesInvLine: Record "Sales Invoice Line"; var LineAmount: Dictionary of [Decimal, Decimal]; var LineVATAmount: Dictionary of [Decimal, Decimal])
     var
         VATEXCode: Text;
         VATClauseDescription: Text;
     begin
+        if not (LineVATAmount.ContainsKey(SalesInvLine."VAT %") and LineAmount.ContainsKey(SalesInvLine."VAT %")) then
+            exit;
+        PeppolVATHelper.GetVATClauseInfo(SalesInvLine."VAT Bus. Posting Group", SalesInvLine."VAT Prod. Posting Group", DocumentLanguageCode, VATEXCode, VATClauseDescription);
+        InsertTaxElement(SettlementElement, FormatDecimal(LineVATAmount.Get(SalesInvLine."VAT %")), FormatDecimal(LineAmount.Get(SalesInvLine."VAT %")),
+            GetTaxCategoryID(SalesInvLine."Tax Category", SalesInvLine."VAT Bus. Posting Group", SalesInvLine."VAT Prod. Posting Group"), FormatFiveDecimal(SalesInvLine."VAT %"),
+            VATEXCode, VATClauseDescription);
+        LineAmount.Remove(SalesInvLine."VAT %");
+        LineVATAmount.Remove(SalesInvLine."VAT %");
+    end;
+
+    local procedure InsertTradeTax(var SettlementElement: XmlElement; var SalesCrMemoLine: Record "Sales Cr.Memo Line"; var LineAmount: Dictionary of [Decimal, Decimal]; var LineVATAmount: Dictionary of [Decimal, Decimal])
+    begin
         if SalesCrMemoLine.FindSet() then
             repeat
-                if LineVATAmount.ContainsKey(SalesCrMemoLine."VAT %") and LineAmount.ContainsKey(SalesCrMemoLine."VAT %") then begin
-                    PeppolVATHelper.GetVATClauseInfo(SalesCrMemoLine."VAT Bus. Posting Group", SalesCrMemoLine."VAT Prod. Posting Group", DocumentLanguageCode, VATEXCode, VATClauseDescription);
-                    InsertTaxElement(SettlementElement, FormatDecimal(LineVATAmount.Get(SalesCrMemoLine."VAT %")), FormatDecimal(LineAmount.Get(SalesCrMemoLine."VAT %")),
-                        GetTaxCategoryID(SalesCrMemoLine."Tax Category", SalesCrMemoLine."VAT Bus. Posting Group", SalesCrMemoLine."VAT Prod. Posting Group"), FormatFiveDecimal(SalesCrMemoLine."VAT %"),
-                        VATEXCode, VATClauseDescription);
-
-                    LineAmount.Remove(SalesCrMemoLine."VAT %");
-                    LineVATAmount.Remove(SalesCrMemoLine."VAT %");
-                end;
+                InsertTradeTaxForLine(SettlementElement, SalesCrMemoLine, LineAmount, LineVATAmount);
             until SalesCrMemoLine.Next() = 0;
+        // Additional lines run last, so that a VAT rate that only an additional line has still gets its breakdown.
+        TempAdditionalSalesCrMemoLine.Reset();
+        if TempAdditionalSalesCrMemoLine.FindSet() then
+            repeat
+                InsertTradeTaxForLine(SettlementElement, TempAdditionalSalesCrMemoLine, LineAmount, LineVATAmount);
+            until TempAdditionalSalesCrMemoLine.Next() = 0;
 
         SalesCrMemoLine.SetRange("VAT %");
         SalesCrMemoLine.SetRange("VAT Calculation Type");
+    end;
+
+    local procedure InsertTradeTaxForLine(var SettlementElement: XmlElement; SalesCrMemoLine: Record "Sales Cr.Memo Line"; var LineAmount: Dictionary of [Decimal, Decimal]; var LineVATAmount: Dictionary of [Decimal, Decimal])
+    var
+        VATEXCode: Text;
+        VATClauseDescription: Text;
+    begin
+        if not (LineVATAmount.ContainsKey(SalesCrMemoLine."VAT %") and LineAmount.ContainsKey(SalesCrMemoLine."VAT %")) then
+            exit;
+        PeppolVATHelper.GetVATClauseInfo(SalesCrMemoLine."VAT Bus. Posting Group", SalesCrMemoLine."VAT Prod. Posting Group", DocumentLanguageCode, VATEXCode, VATClauseDescription);
+        InsertTaxElement(SettlementElement, FormatDecimal(LineVATAmount.Get(SalesCrMemoLine."VAT %")), FormatDecimal(LineAmount.Get(SalesCrMemoLine."VAT %")),
+            GetTaxCategoryID(SalesCrMemoLine."Tax Category", SalesCrMemoLine."VAT Bus. Posting Group", SalesCrMemoLine."VAT Prod. Posting Group"), FormatFiveDecimal(SalesCrMemoLine."VAT %"),
+            VATEXCode, VATClauseDescription);
+        LineAmount.Remove(SalesCrMemoLine."VAT %");
+        LineVATAmount.Remove(SalesCrMemoLine."VAT %");
     end;
 
     local procedure InsertTaxElement(var SettlementElement: XmlElement; CalculatedAmount: Text; BasisAmount: Text; CategoryCode: Text; RateApplicablePercent: Text; VATEXCode: Text; VATClauseDescription: Text)
@@ -1015,6 +1071,11 @@ codeunit 13917 "Export ZUGFeRD Document"
                 if not IsItemChargeAllowanceCharge(SalesInvoiceLine."Line No.") then
                     InsertInvoiceLine(SupplyChainTradeTransactionElement, SalesInvoiceLine, Currency, CurrencyCode, SalesInvoiceHeader."Prices Including VAT");
             until SalesInvoiceLine.Next() = 0;
+        TempAdditionalSalesInvLine.Reset();
+        if TempAdditionalSalesInvLine.FindSet() then
+            repeat
+                InsertInvoiceLine(SupplyChainTradeTransactionElement, TempAdditionalSalesInvLine, Currency, CurrencyCode, SalesInvoiceHeader."Prices Including VAT");
+            until TempAdditionalSalesInvLine.Next() = 0;
         InsertApplicableHeaderTradeAgreement(SupplyChainTradeTransactionElement, SalesInvoiceHeader);
         InsertApplicableHeaderTradeDelivery(SupplyChainTradeTransactionElement, SalesInvoiceHeader);
         InsertApplicableHeaderTradeSettlement(SupplyChainTradeTransactionElement, SalesInvoiceHeader, SalesInvoiceLine, CurrencyCode, LineAmount, LineVATAmount, LineAmounts, LineDiscAmount);
@@ -1064,6 +1125,7 @@ codeunit 13917 "Export ZUGFeRD Document"
 
     local procedure InsertInvoiceLine(var SupplyChainTradeTransactionElement: XmlElement; var SalesInvoiceLine: Record "Sales Invoice Line"; Currency: Record Currency; CurrencyCode: Code[10]; PricesIncVAT: Boolean)
     var
+        LineRecordRef: RecordRef;
         InvoiceLineElement: XmlElement;
         AssociatedDocumentLineElement: XmlElement;
         SpecifiedTradeProductElement: XmlElement;
@@ -1083,8 +1145,8 @@ codeunit 13917 "Export ZUGFeRD Document"
             InvoiceLineElement := XmlElement.Create('IncludedSupplyChainTradeLineItem', XmlNamespaceRAM);
             if PricesIncVAT then
                 ExcludeVAT(SalesInvoiceLine, Currency."Amount Rounding Precision");
-            AssociatedDocumentLineElement := XmlElement.Create('AssociatedDocumentLineDocument', XmlNamespaceRAM);
-            AssociatedDocumentLineElement.Add(XmlElement.Create('LineID', XmlNamespaceRAM, Format(SalesInvoiceLine."Line No.")));
+            LineRecordRef.GetTable(SalesInvoiceLine);
+            AssociatedDocumentLineElement := CreateAssociatedDocumentLineElement(LineRecordRef, SalesInvoiceLine."Line No.");
             InvoiceLineElement.Add(AssociatedDocumentLineElement);
 
             SpecifiedTradeProductElement := XmlElement.Create('SpecifiedTradeProduct', XmlNamespaceRAM);
@@ -1146,6 +1208,11 @@ codeunit 13917 "Export ZUGFeRD Document"
                 if not IsItemChargeAllowanceCharge(SalesCrMemoLine."Line No.") then
                     InsertCrMemoLine(SupplyChainTradeTransactionElement, SalesCrMemoLine, Currency, CurrencyCode, SalesCrMemoHeader."Prices Including VAT");
             until SalesCrMemoLine.Next() = 0;
+        TempAdditionalSalesCrMemoLine.Reset();
+        if TempAdditionalSalesCrMemoLine.FindSet() then
+            repeat
+                InsertCrMemoLine(SupplyChainTradeTransactionElement, TempAdditionalSalesCrMemoLine, Currency, CurrencyCode, SalesCrMemoHeader."Prices Including VAT");
+            until TempAdditionalSalesCrMemoLine.Next() = 0;
         InsertApplicableHeaderTradeAgreement(SupplyChainTradeTransactionElement, SalesCrMemoHeader);
         InsertApplicableHeaderTradeDelivery(SupplyChainTradeTransactionElement, SalesCrMemoHeader);
         InsertApplicableHeaderTradeSettlement(SupplyChainTradeTransactionElement, SalesCrMemoHeader, SalesCrMemoLine, CurrencyCode, LineAmount, LineVATAmount, LineAmounts, LineDiscAmount);
@@ -1155,6 +1222,7 @@ codeunit 13917 "Export ZUGFeRD Document"
 
     local procedure InsertCrMemoLine(var SupplyChainTradeTransactionElement: XmlElement; var SalesCrMemoLine: Record "Sales Cr.Memo Line"; Currency: Record Currency; CurrencyCode: Code[10]; PricesIncVAT: Boolean)
     var
+        LineRecordRef: RecordRef;
         CrMemoLineElement: XmlElement;
         AssociatedDocumentLineElement: XmlElement;
         SpecifiedTradeProductElement: XmlElement;
@@ -1174,8 +1242,8 @@ codeunit 13917 "Export ZUGFeRD Document"
             CrMemoLineElement := XmlElement.Create('IncludedSupplyChainTradeLineItem', XmlNamespaceRAM);
             if PricesIncVAT then
                 ExcludeVAT(SalesCrMemoLine, Currency."Amount Rounding Precision");
-            AssociatedDocumentLineElement := XmlElement.Create('AssociatedDocumentLineDocument', XmlNamespaceRAM);
-            AssociatedDocumentLineElement.Add(XmlElement.Create('LineID', XmlNamespaceRAM, Format(SalesCrMemoLine."Line No.")));
+            LineRecordRef.GetTable(SalesCrMemoLine);
+            AssociatedDocumentLineElement := CreateAssociatedDocumentLineElement(LineRecordRef, SalesCrMemoLine."Line No.");
             CrMemoLineElement.Add(AssociatedDocumentLineElement);
 
             SpecifiedTradeProductElement := XmlElement.Create('SpecifiedTradeProduct', XmlNamespaceRAM);
@@ -1372,14 +1440,24 @@ codeunit 13917 "Export ZUGFeRD Document"
             exit;
         if SalesInvLine.FindSet() then
             repeat
-                if LineDiscAmount.ContainsKey(SalesInvLine."VAT %") then begin
-                    InsertAllowanceCharge(
-                               RootXMLNode, 'Document discount',
-                               GetTaxCategoryID(SalesInvLine."Tax Category", SalesInvLine."VAT Bus. Posting Group", SalesInvLine."VAT Prod. Posting Group"),
-                               LineDiscAmount.Get(SalesInvLine."VAT %"), SalesInvLine."VAT %", true);
-                    LineDiscAmount.Remove(SalesInvLine."VAT %");
-                end;
+                InsertInvDiscountAllowanceChargeForLine(RootXMLNode, SalesInvLine, LineDiscAmount);
             until SalesInvLine.Next() = 0;
+        TempAdditionalSalesInvLine.Reset();
+        if TempAdditionalSalesInvLine.FindSet() then
+            repeat
+                InsertInvDiscountAllowanceChargeForLine(RootXMLNode, TempAdditionalSalesInvLine, LineDiscAmount);
+            until TempAdditionalSalesInvLine.Next() = 0;
+    end;
+
+    local procedure InsertInvDiscountAllowanceChargeForLine(var RootXMLNode: XmlElement; SalesInvLine: Record "Sales Invoice Line"; var LineDiscAmount: Dictionary of [Decimal, Decimal])
+    begin
+        if not LineDiscAmount.ContainsKey(SalesInvLine."VAT %") then
+            exit;
+        InsertAllowanceCharge(
+                   RootXMLNode, 'Document discount',
+                   GetTaxCategoryID(SalesInvLine."Tax Category", SalesInvLine."VAT Bus. Posting Group", SalesInvLine."VAT Prod. Posting Group"),
+                   LineDiscAmount.Get(SalesInvLine."VAT %"), SalesInvLine."VAT %", true);
+        LineDiscAmount.Remove(SalesInvLine."VAT %");
     end;
 
     local procedure InsertInvDiscountAllowanceCharge(var RootXMLNode: XmlElement; var SalesCrMemoLine: Record "Sales Cr.Memo Line"; var LineDiscAmount: Dictionary of [Decimal, Decimal]; var LineAmounts: Dictionary of [Text, Decimal])
@@ -1391,14 +1469,24 @@ codeunit 13917 "Export ZUGFeRD Document"
             exit;
         if SalesCrMemoLine.FindSet() then
             repeat
-                if LineDiscAmount.ContainsKey(SalesCrMemoLine."VAT %") then begin
-                    InsertAllowanceCharge(
-                               RootXMLNode, 'Document discount',
-                               GetTaxCategoryID(SalesCrMemoLine."Tax Category", SalesCrMemoLine."VAT Bus. Posting Group", SalesCrMemoLine."VAT Prod. Posting Group"),
-                               LineDiscAmount.Get(SalesCrMemoLine."VAT %"), SalesCrMemoLine."VAT %", true);
-                    LineDiscAmount.Remove(SalesCrMemoLine."VAT %");
-                end;
+                InsertInvDiscountAllowanceChargeForLine(RootXMLNode, SalesCrMemoLine, LineDiscAmount);
             until SalesCrMemoLine.Next() = 0;
+        TempAdditionalSalesCrMemoLine.Reset();
+        if TempAdditionalSalesCrMemoLine.FindSet() then
+            repeat
+                InsertInvDiscountAllowanceChargeForLine(RootXMLNode, TempAdditionalSalesCrMemoLine, LineDiscAmount);
+            until TempAdditionalSalesCrMemoLine.Next() = 0;
+    end;
+
+    local procedure InsertInvDiscountAllowanceChargeForLine(var RootXMLNode: XmlElement; SalesCrMemoLine: Record "Sales Cr.Memo Line"; var LineDiscAmount: Dictionary of [Decimal, Decimal])
+    begin
+        if not LineDiscAmount.ContainsKey(SalesCrMemoLine."VAT %") then
+            exit;
+        InsertAllowanceCharge(
+                   RootXMLNode, 'Document discount',
+                   GetTaxCategoryID(SalesCrMemoLine."Tax Category", SalesCrMemoLine."VAT Bus. Posting Group", SalesCrMemoLine."VAT Prod. Posting Group"),
+                   LineDiscAmount.Get(SalesCrMemoLine."VAT %"), SalesCrMemoLine."VAT %", true);
+        LineDiscAmount.Remove(SalesCrMemoLine."VAT %");
     end;
 
     local procedure InsertAllowanceCharge(var RootXMLNode: XmlElement; AllowanceChargeReason: Text; TaxCategory: Text; Amount: Decimal; Percent: Decimal; InsertCategoryTax: Boolean)
@@ -1417,6 +1505,8 @@ codeunit 13917 "Export ZUGFeRD Document"
     local procedure CalculateLineAmounts(SalesInvoiceHeader: Record "Sales Invoice Header"; var SalesInvLine: Record "Sales Invoice Line"; Currency: Record Currency; var LineAmounts: Dictionary of [Text, Decimal])
     var
         TotalInvDiscountAmount: Decimal;
+        TotalAmount: Decimal;
+        TotalAmountIncludingVAT: Decimal;
     begin
         repeat
             if SalesInvoiceHeader."Prices Including VAT" then
@@ -1425,11 +1515,24 @@ codeunit 13917 "Export ZUGFeRD Document"
         until SalesInvLine.Next() = 0;
 
         SalesInvLine.CalcSums(Amount, "Amount Including VAT");
+        TotalAmount := SalesInvLine.Amount;
+        TotalAmountIncludingVAT := SalesInvLine."Amount Including VAT";
+
+        TempAdditionalSalesInvLine.Reset();
+        if TempAdditionalSalesInvLine.FindSet() then
+            repeat
+                TotalAmount += TempAdditionalSalesInvLine.Amount;
+                TotalAmountIncludingVAT += TempAdditionalSalesInvLine."Amount Including VAT";
+                if SalesInvoiceHeader."Prices Including VAT" then
+                    TotalInvDiscountAmount += Round(TempAdditionalSalesInvLine."Inv. Discount Amount" / (1 + TempAdditionalSalesInvLine."VAT %" / 100), Currency."Amount Rounding Precision")
+                else
+                    TotalInvDiscountAmount += TempAdditionalSalesInvLine."Inv. Discount Amount";
+            until TempAdditionalSalesInvLine.Next() = 0;
 
         if not LineAmounts.ContainsKey(SalesInvLine.FieldName(Amount)) then
-            LineAmounts.Add(SalesInvLine.FieldName(Amount), SalesInvLine.Amount);
+            LineAmounts.Add(SalesInvLine.FieldName(Amount), TotalAmount);
         if not LineAmounts.ContainsKey(SalesInvLine.FieldName("Amount Including VAT")) then
-            LineAmounts.Add(SalesInvLine.FieldName("Amount Including VAT"), SalesInvLine."Amount Including VAT");
+            LineAmounts.Add(SalesInvLine.FieldName("Amount Including VAT"), TotalAmountIncludingVAT);
         if not LineAmounts.ContainsKey(SalesInvLine.FieldName("Inv. Discount Amount")) then
             LineAmounts.Add(SalesInvLine.FieldName("Inv. Discount Amount"), TotalInvDiscountAmount);
         OnAfterCalculateInvoiceLineAmounts(SalesInvoiceHeader, SalesInvLine, Currency, LineAmounts);
@@ -1438,6 +1541,8 @@ codeunit 13917 "Export ZUGFeRD Document"
     local procedure CalculateLineAmounts(SalesCrMemoHeader: Record "Sales Cr.Memo Header"; var SalesCrMemoLine: Record "Sales Cr.Memo Line"; Currency: Record Currency; var LineAmounts: Dictionary of [Text, Decimal])
     var
         TotalInvDiscountAmount: Decimal;
+        TotalAmount: Decimal;
+        TotalAmountIncludingVAT: Decimal;
     begin
         repeat
             if SalesCrMemoHeader."Prices Including VAT" then
@@ -1446,11 +1551,24 @@ codeunit 13917 "Export ZUGFeRD Document"
         until SalesCrMemoLine.Next() = 0;
 
         SalesCrMemoLine.CalcSums(Amount, "Amount Including VAT");
+        TotalAmount := SalesCrMemoLine.Amount;
+        TotalAmountIncludingVAT := SalesCrMemoLine."Amount Including VAT";
+
+        TempAdditionalSalesCrMemoLine.Reset();
+        if TempAdditionalSalesCrMemoLine.FindSet() then
+            repeat
+                TotalAmount += TempAdditionalSalesCrMemoLine.Amount;
+                TotalAmountIncludingVAT += TempAdditionalSalesCrMemoLine."Amount Including VAT";
+                if SalesCrMemoHeader."Prices Including VAT" then
+                    TotalInvDiscountAmount += Round(TempAdditionalSalesCrMemoLine."Inv. Discount Amount" / (1 + TempAdditionalSalesCrMemoLine."VAT %" / 100), Currency."Amount Rounding Precision")
+                else
+                    TotalInvDiscountAmount += TempAdditionalSalesCrMemoLine."Inv. Discount Amount";
+            until TempAdditionalSalesCrMemoLine.Next() = 0;
 
         if not LineAmounts.ContainsKey(SalesCrMemoLine.FieldName(Amount)) then
-            LineAmounts.Add(SalesCrMemoLine.FieldName(Amount), SalesCrMemoLine.Amount);
+            LineAmounts.Add(SalesCrMemoLine.FieldName(Amount), TotalAmount);
         if not LineAmounts.ContainsKey(SalesCrMemoLine.FieldName("Amount Including VAT")) then
-            LineAmounts.Add(SalesCrMemoLine.FieldName("Amount Including VAT"), SalesCrMemoLine."Amount Including VAT");
+            LineAmounts.Add(SalesCrMemoLine.FieldName("Amount Including VAT"), TotalAmountIncludingVAT);
         if not LineAmounts.ContainsKey(SalesCrMemoLine.FieldName("Inv. Discount Amount")) then
             LineAmounts.Add(SalesCrMemoLine.FieldName("Inv. Discount Amount"), TotalInvDiscountAmount);
         OnAfterCalculateCrMemoLineAmounts(SalesCrMemoHeader, SalesCrMemoLine, Currency, LineAmounts);
@@ -1474,24 +1592,44 @@ codeunit 13917 "Export ZUGFeRD Document"
     begin
         if SalesInvLine.FindSet() then
             repeat
-                AddAmountForVAT(SalesInvLine."VAT %", SalesInvLine."Amount Including VAT" - SalesInvLine.Amount, LineVATAmount);
-                AddAmountForVAT(SalesInvLine."VAT %", SalesInvLine.Amount, LineAmount);
-                if PricesIncVAT then
-                    ExcludeVAT(SalesInvLine, Currency."Amount Rounding Precision");
-                AddAmountForVAT(SalesInvLine."VAT %", SalesInvLine."Inv. Discount Amount", LineDiscAmount);
+                AddLineVATAmounts(SalesInvLine, LineVATAmount, LineAmount, LineDiscAmount, PricesIncVAT, Currency);
             until SalesInvLine.Next() = 0;
+        TempAdditionalSalesInvLine.Reset();
+        if TempAdditionalSalesInvLine.FindSet() then
+            repeat
+                AddLineVATAmounts(TempAdditionalSalesInvLine, LineVATAmount, LineAmount, LineDiscAmount, PricesIncVAT, Currency);
+            until TempAdditionalSalesInvLine.Next() = 0;
+    end;
+
+    local procedure AddLineVATAmounts(SalesInvLine: Record "Sales Invoice Line"; var LineVATAmount: Dictionary of [Decimal, Decimal]; var LineAmount: Dictionary of [Decimal, Decimal]; var LineDiscAmount: Dictionary of [Decimal, Decimal]; PricesIncVAT: Boolean; Currency: Record Currency)
+    begin
+        AddAmountForVAT(SalesInvLine."VAT %", SalesInvLine."Amount Including VAT" - SalesInvLine.Amount, LineVATAmount);
+        AddAmountForVAT(SalesInvLine."VAT %", SalesInvLine.Amount, LineAmount);
+        if PricesIncVAT then
+            ExcludeVAT(SalesInvLine, Currency."Amount Rounding Precision");
+        AddAmountForVAT(SalesInvLine."VAT %", SalesInvLine."Inv. Discount Amount", LineDiscAmount);
     end;
 
     local procedure InsertVATAmounts(var SalesCrMemoLine: Record "Sales Cr.Memo Line"; var LineVATAmount: Dictionary of [Decimal, Decimal]; var LineAmount: Dictionary of [Decimal, Decimal]; var LineDiscAmount: Dictionary of [Decimal, Decimal]; PricesIncVAT: Boolean; Currency: Record Currency)
     begin
         if SalesCrMemoLine.FindSet() then
             repeat
-                AddAmountForVAT(SalesCrMemoLine."VAT %", SalesCrMemoLine."Amount Including VAT" - SalesCrMemoLine.Amount, LineVATAmount);
-                AddAmountForVAT(SalesCrMemoLine."VAT %", SalesCrMemoLine.Amount, LineAmount);
-                if PricesIncVAT then
-                    ExcludeVAT(SalesCrMemoLine, Currency."Amount Rounding Precision");
-                AddAmountForVAT(SalesCrMemoLine."VAT %", SalesCrMemoLine."Inv. Discount Amount", LineDiscAmount);
+                AddLineVATAmounts(SalesCrMemoLine, LineVATAmount, LineAmount, LineDiscAmount, PricesIncVAT, Currency);
             until SalesCrMemoLine.Next() = 0;
+        TempAdditionalSalesCrMemoLine.Reset();
+        if TempAdditionalSalesCrMemoLine.FindSet() then
+            repeat
+                AddLineVATAmounts(TempAdditionalSalesCrMemoLine, LineVATAmount, LineAmount, LineDiscAmount, PricesIncVAT, Currency);
+            until TempAdditionalSalesCrMemoLine.Next() = 0;
+    end;
+
+    local procedure AddLineVATAmounts(SalesCrMemoLine: Record "Sales Cr.Memo Line"; var LineVATAmount: Dictionary of [Decimal, Decimal]; var LineAmount: Dictionary of [Decimal, Decimal]; var LineDiscAmount: Dictionary of [Decimal, Decimal]; PricesIncVAT: Boolean; Currency: Record Currency)
+    begin
+        AddAmountForVAT(SalesCrMemoLine."VAT %", SalesCrMemoLine."Amount Including VAT" - SalesCrMemoLine.Amount, LineVATAmount);
+        AddAmountForVAT(SalesCrMemoLine."VAT %", SalesCrMemoLine.Amount, LineAmount);
+        if PricesIncVAT then
+            ExcludeVAT(SalesCrMemoLine, Currency."Amount Rounding Precision");
+        AddAmountForVAT(SalesCrMemoLine."VAT %", SalesCrMemoLine."Inv. Discount Amount", LineDiscAmount);
     end;
 
     local procedure AddAmountForVAT(VATPercent: Decimal; NewAmount: Decimal; var TotalAmounts: Dictionary of [Decimal, Decimal])
@@ -1996,6 +2134,180 @@ codeunit 13917 "Export ZUGFeRD Document"
     end;
     #endregion
 
+    #region Profile
+    /// <summary>
+    /// Resolves the ZUGFeRD profile for a document. The export and any check that depends on the profile use this
+    /// procedure, so that both always see the same profile.
+    /// </summary>
+    /// <param name="EDocService">The E-Document Service that triggered the export. A blank service gives the XRechnung profile.</param>
+    /// <param name="HeaderRecordRef">The posted source document: sales or service invoice or credit memo.</param>
+    /// <returns>The profile to export.</returns>
+    procedure ResolveZUGFeRDProfile(EDocService: Record "E-Document Service"; HeaderRecordRef: RecordRef) ResolvedProfile: Enum "ZUGFeRD Profile"
+    begin
+        ResolvedProfile := EDocService."ZUGFeRD Profile";
+        OnAfterResolveZUGFeRDProfile(EDocService, HeaderRecordRef, ResolvedProfile);
+    end;
+
+    local procedure GetGuidelineID(): Text
+    begin
+        if CurrentZUGFeRDProfile = CurrentZUGFeRDProfile::Extended then
+            exit(ExtendedGuidelineIDTok);
+        exit(XRechnungGuidelineIDTok);
+    end;
+
+    local procedure GetXMLAttachmentName(): Text
+    begin
+        // BR-HYBRID: the EN 16931 based profiles embed factur-x.xml, the XRechnung profile embeds xrechnung.xml.
+        if CurrentZUGFeRDProfile = CurrentZUGFeRDProfile::Extended then
+            exit(FacturXAttachmentNameTok);
+        exit(XRechnungAttachmentNameTok);
+    end;
+
+    local procedure GetHeaderRecordRef(RecordVariant: Variant; var HeaderRecordRef: RecordRef)
+    var
+        DataTypeManagement: Codeunit "Data Type Management";
+    begin
+        // The original source document, so that a subscriber sees the service header and not the sales header it was transferred to.
+        // The passed header is only used when InsertSupplyChainTradeTransaction is called directly, without CreateXML.
+        if SourceDocumentRecordRef.Number() <> 0 then begin
+            HeaderRecordRef := SourceDocumentRecordRef;
+            exit;
+        end;
+        DataTypeManagement.GetRecordRef(RecordVariant, HeaderRecordRef);
+    end;
+
+    local procedure InsertHeaderNotes(var ExchangedDocumentElement: XmlElement; RecordVariant: Variant)
+    var
+        TempZUGFeRDNote: Record "ZUGFeRD Note" temporary;
+        HeaderRecordRef: RecordRef;
+        IncludedNoteElement: XmlElement;
+    begin
+        GetHeaderRecordRef(RecordVariant, HeaderRecordRef);
+        OnCollectHeaderNotes(HeaderRecordRef, CurrentZUGFeRDProfile, TempZUGFeRDNote);
+        TempZUGFeRDNote.Reset();
+        if not TempZUGFeRDNote.FindSet() then
+            exit;
+        repeat
+            // CII R74: no empty elements.
+            if TempZUGFeRDNote.Content <> '' then begin
+                IncludedNoteElement := XmlElement.Create('IncludedNote', XmlNamespaceRAM);
+                IncludedNoteElement.Add(XmlElement.Create('Content', XmlNamespaceRAM, TempZUGFeRDNote.Content));
+                if TempZUGFeRDNote."Subject Code" <> '' then
+                    IncludedNoteElement.Add(XmlElement.Create('SubjectCode', XmlNamespaceRAM, TempZUGFeRDNote."Subject Code"));
+                ExchangedDocumentElement.Add(IncludedNoteElement);
+            end;
+        until TempZUGFeRDNote.Next() = 0;
+    end;
+
+    local procedure CreateAssociatedDocumentLineElement(LineRecordRef: RecordRef; LineNo: Integer) AssociatedDocumentLineElement: XmlElement
+    var
+        LineSubtype: Enum "ZUGFeRD Line Subtype";
+        LineID: Text;
+        ParentLineID: Text;
+    begin
+        LineID := Format(LineNo);
+        OnInsertLineOnBeforeCreateAssociatedDocumentLine(LineRecordRef, CurrentZUGFeRDProfile, LineID, ParentLineID, LineSubtype);
+        if LineID = '' then
+            LineID := Format(LineNo);
+
+        AssociatedDocumentLineElement := XmlElement.Create('AssociatedDocumentLineDocument', XmlNamespaceRAM);
+        AssociatedDocumentLineElement.Add(XmlElement.Create('LineID', XmlNamespaceRAM, LineID));
+        // Sub-lines (BT-X-304 ParentLineID, BT-X-8 LineStatusReasonCode) exist only in the EXTENDED profile.
+        if CurrentZUGFeRDProfile <> CurrentZUGFeRDProfile::Extended then
+            exit;
+        // BR-FXEXT-06: a line with a parent line must have a sub-line type.
+        if (ParentLineID <> '') and (LineSubtype = LineSubtype::" ") then
+            LineSubtype := LineSubtype::Detail;
+        if ParentLineID <> '' then
+            AssociatedDocumentLineElement.Add(XmlElement.Create('ParentLineID', XmlNamespaceRAM, ParentLineID));
+        if LineSubtype <> LineSubtype::" " then
+            AssociatedDocumentLineElement.Add(XmlElement.Create('LineStatusReasonCode', XmlNamespaceRAM, GetLineSubtypeCode(LineSubtype)));
+    end;
+
+    local procedure GetLineSubtypeCode(LineSubtype: Enum "ZUGFeRD Line Subtype"): Text
+    begin
+        case LineSubtype of
+            LineSubtype::Detail:
+                exit(LineSubtypeDetailTok);
+            LineSubtype::Group:
+                exit(LineSubtypeGroupTok);
+            LineSubtype::Information:
+                exit(LineSubtypeInformationTok);
+        end;
+        exit('');
+    end;
+
+    local procedure CollectAdditionalLines(var SalesInvLine: Record "Sales Invoice Line")
+    var
+        ExportedLineNos: List of [Integer];
+    begin
+        OnCollectAdditionalInvoiceLines(SourceDocumentRecordRef, CurrentZUGFeRDProfile, TempAdditionalSalesInvLine);
+        TempAdditionalSalesInvLine.Reset();
+        if TempAdditionalSalesInvLine.IsEmpty() then
+            exit;
+
+        // The line number identifies a line in the item charge classification and is the default line ID (BT-126),
+        // so an additional line must not reuse the number of a document line.
+        if SalesInvLine.FindSet() then
+            repeat
+                ExportedLineNos.Add(SalesInvLine."Line No.");
+            until SalesInvLine.Next() = 0;
+        if SalesInvLine.FindSet() then;
+        TempAdditionalSalesInvLine.FindSet();
+        repeat
+            if ExportedLineNos.Contains(TempAdditionalSalesInvLine."Line No.") then
+                Error(AdditionalLineNoExistsErr, TempAdditionalSalesInvLine."Line No.");
+        until TempAdditionalSalesInvLine.Next() = 0;
+    end;
+
+    local procedure CollectAdditionalLines(var SalesCrMemoLine: Record "Sales Cr.Memo Line")
+    var
+        ExportedLineNos: List of [Integer];
+    begin
+        OnCollectAdditionalCrMemoLines(SourceDocumentRecordRef, CurrentZUGFeRDProfile, TempAdditionalSalesCrMemoLine);
+        TempAdditionalSalesCrMemoLine.Reset();
+        if TempAdditionalSalesCrMemoLine.IsEmpty() then
+            exit;
+
+        // The line number identifies a line in the item charge classification and is the default line ID (BT-126),
+        // so an additional line must not reuse the number of a document line.
+        if SalesCrMemoLine.FindSet() then
+            repeat
+                ExportedLineNos.Add(SalesCrMemoLine."Line No.");
+            until SalesCrMemoLine.Next() = 0;
+        if SalesCrMemoLine.FindSet() then;
+        TempAdditionalSalesCrMemoLine.FindSet();
+        repeat
+            if ExportedLineNos.Contains(TempAdditionalSalesCrMemoLine."Line No.") then
+                Error(AdditionalLineNoExistsErr, TempAdditionalSalesCrMemoLine."Line No.");
+        until TempAdditionalSalesCrMemoLine.Next() = 0;
+    end;
+
+    local procedure ClearAdditionalLines()
+    begin
+        TempAdditionalSalesInvLine.Reset();
+        TempAdditionalSalesInvLine.DeleteAll();
+        TempAdditionalSalesCrMemoLine.Reset();
+        TempAdditionalSalesCrMemoLine.DeleteAll();
+    end;
+
+    local procedure GetPrepaidAmount(RecordVariant: Variant) PrepaidAmount: Decimal
+    var
+        HeaderRecordRef: RecordRef;
+    begin
+        GetHeaderRecordRef(RecordVariant, HeaderRecordRef);
+        OnInsertMonetarySummationOnBeforeCreateElement(HeaderRecordRef, CurrentZUGFeRDProfile, PrepaidAmount);
+    end;
+
+    local procedure RaiseOnAfterInsertApplicableHeaderTradeDelivery(var DeliveryElement: XmlElement; RecordVariant: Variant)
+    var
+        HeaderRecordRef: RecordRef;
+    begin
+        GetHeaderRecordRef(RecordVariant, HeaderRecordRef);
+        OnAfterInsertApplicableHeaderTradeDelivery(DeliveryElement, HeaderRecordRef, CurrentZUGFeRDProfile);
+    end;
+    #endregion
+
     #region CommonFunctions
     local procedure GetSetups()
     begin
@@ -2258,6 +2570,98 @@ codeunit 13917 "Export ZUGFeRD Document"
     /// </summary>
     [IntegrationEvent(false, false)]
     local procedure OnInsertPaymentMethodOnBeforeAddToRoot(var PaymentMethodElement: XmlElement; HeaderRecRef: RecordRef)
+    begin
+    end;
+
+    /// <summary>
+    /// Fires after the ZUGFeRD profile of a document was read from the E-Document Service.
+    /// Subscribe to choose the profile per document, for example per customer.
+    /// The export and the checks use the same resolution, so they always agree on the profile.
+    /// </summary>
+    /// <param name="EDocumentService">The E-Document Service that triggered the export. Blank for a plain report print.</param>
+    /// <param name="HeaderRecordRef">The posted source document: sales or service invoice or credit memo.</param>
+    /// <param name="ZUGFeRDProfile">The profile to export. Change it to override the profile of the service.</param>
+    [IntegrationEvent(false, false)]
+    local procedure OnAfterResolveZUGFeRDProfile(EDocumentService: Record "E-Document Service"; HeaderRecordRef: RecordRef; var ZUGFeRDProfile: Enum "ZUGFeRD Profile")
+    begin
+    end;
+
+    /// <summary>
+    /// Fires when the document header (ExchangedDocument) is written. Add notes (BG-1) to the buffer; the export writes
+    /// them as IncludedNote elements in the order of the buffer, for example a note with subject code ADU or REG.
+    /// </summary>
+    /// <param name="HeaderRecordRef">The posted source document: sales or service invoice or credit memo.</param>
+    /// <param name="ZUGFeRDProfile">The profile that is exported.</param>
+    /// <param name="TempZUGFeRDNote">The notes to write. Use AddNote to add a note.</param>
+    [IntegrationEvent(false, false)]
+    local procedure OnCollectHeaderNotes(HeaderRecordRef: RecordRef; ZUGFeRDProfile: Enum "ZUGFeRD Profile"; var TempZUGFeRDNote: Record "ZUGFeRD Note" temporary)
+    begin
+    end;
+
+    /// <summary>
+    /// Fires for every invoice or credit memo line before its line identification (AssociatedDocumentLineDocument) is written,
+    /// also for additional lines. Set the line ID (BT-126) and, for the EXTENDED profile, the parent line (BT-X-304) and the
+    /// sub-line type (BT-X-8). ParentLineID must be the line ID of another line of the document (BR-FXEXT-11).
+    /// A line with a parent line and no sub-line type is written as DETAIL. Parent line and sub-line type are ignored for other profiles.
+    /// </summary>
+    /// <param name="LineRecordRef">The line: a Sales Invoice Line or Sales Cr.Memo Line. Service lines are passed as the sales line they are transferred to.</param>
+    /// <param name="ZUGFeRDProfile">The profile that is exported.</param>
+    /// <param name="LineID">The line ID. The default is the line number.</param>
+    /// <param name="ParentLineID">The line ID of the parent line. Blank for a line without a parent.</param>
+    /// <param name="LineSubtype">The sub-line type.</param>
+    [IntegrationEvent(false, false)]
+    local procedure OnInsertLineOnBeforeCreateAssociatedDocumentLine(LineRecordRef: RecordRef; ZUGFeRDProfile: Enum "ZUGFeRD Profile"; var LineID: Text; var ParentLineID: Text; var LineSubtype: Enum "ZUGFeRD Line Subtype")
+    begin
+    end;
+
+    /// <summary>
+    /// Fires once per sales or service invoice before any amount is calculated. Add lines that are not posted document lines
+    /// but must be in the e-invoice, for example the old-part value of an exchange part. The export writes them after the
+    /// document lines and includes them in the VAT breakdown and the document totals, like posted lines.
+    /// Fill at least Line No., Description, Quantity, Unit of Measure Code, Unit Price, Amount, Amount Including VAT, VAT %,
+    /// and Tax Category or the VAT posting groups. Amounts follow the Prices Including VAT setting of the document, like posted lines.
+    /// The line number must not be used by a line of the document.
+    /// </summary>
+    /// <param name="HeaderRecordRef">The posted source document: sales or service invoice.</param>
+    /// <param name="ZUGFeRDProfile">The profile that is exported.</param>
+    /// <param name="TempAdditionalSalesInvLine">The additional lines.</param>
+    [IntegrationEvent(false, false)]
+    local procedure OnCollectAdditionalInvoiceLines(HeaderRecordRef: RecordRef; ZUGFeRDProfile: Enum "ZUGFeRD Profile"; var TempAdditionalSalesInvLine: Record "Sales Invoice Line" temporary)
+    begin
+    end;
+
+    /// <summary>
+    /// Fires once per sales or service credit memo before any amount is calculated. See OnCollectAdditionalInvoiceLines.
+    /// </summary>
+    /// <param name="HeaderRecordRef">The posted source document: sales or service credit memo.</param>
+    /// <param name="ZUGFeRDProfile">The profile that is exported.</param>
+    /// <param name="TempAdditionalSalesCrMemoLine">The additional lines.</param>
+    [IntegrationEvent(false, false)]
+    local procedure OnCollectAdditionalCrMemoLines(HeaderRecordRef: RecordRef; ZUGFeRDProfile: Enum "ZUGFeRD Profile"; var TempAdditionalSalesCrMemoLine: Record "Sales Cr.Memo Line" temporary)
+    begin
+    end;
+
+    /// <summary>
+    /// Fires before the document totals (SpecifiedTradeSettlementHeaderMonetarySummation) are written.
+    /// Set the paid amount (BT-113). The amount due for payment (BT-115) is the invoice total with VAT (BT-112) minus the paid amount.
+    /// </summary>
+    /// <param name="HeaderRecordRef">The posted source document: sales or service invoice or credit memo.</param>
+    /// <param name="ZUGFeRDProfile">The profile that is exported.</param>
+    /// <param name="PrepaidAmount">The paid amount. The default is 0.</param>
+    [IntegrationEvent(false, false)]
+    local procedure OnInsertMonetarySummationOnBeforeCreateElement(HeaderRecordRef: RecordRef; ZUGFeRDProfile: Enum "ZUGFeRD Profile"; var PrepaidAmount: Decimal)
+    begin
+    end;
+
+    /// <summary>
+    /// Fires immediately before the delivery block (ApplicableHeaderTradeDelivery) is added to the document.
+    /// Subscribe to append elements that follow the actual delivery date in the XSD sequence, for example the despatch advice reference (BT-16).
+    /// </summary>
+    /// <param name="DeliveryElement">The delivery block.</param>
+    /// <param name="HeaderRecordRef">The posted source document: sales or service invoice or credit memo.</param>
+    /// <param name="ZUGFeRDProfile">The profile that is exported.</param>
+    [IntegrationEvent(false, false)]
+    local procedure OnAfterInsertApplicableHeaderTradeDelivery(var DeliveryElement: XmlElement; HeaderRecordRef: RecordRef; ZUGFeRDProfile: Enum "ZUGFeRD Profile")
     begin
     end;
 
