@@ -26,6 +26,7 @@ using Microsoft.Purchases.Vendor;
 using Microsoft.Sales.Customer;
 using Microsoft.Sales.Document;
 using Microsoft.Sales.History;
+using Microsoft.Sales.Receivables;
 using Microsoft.Service.Document;
 using Microsoft.Service.History;
 using Microsoft.Service.Test;
@@ -83,6 +84,13 @@ codeunit 13922 "ZUGFeRD XML Document Tests"
         ShipToGlobalIdTok: Label '/rsm:CrossIndustryInvoice/rsm:SupplyChainTradeTransaction/ram:ApplicableHeaderTradeDelivery/ram:ShipToTradeParty/ram:GlobalID', Locked = true;
         GuidelineIDTok: Label '/rsm:CrossIndustryInvoice/rsm:ExchangedDocumentContext/ram:GuidelineSpecifiedDocumentContextParameter/ram:ID', Locked = true;
         HeaderNoteTok: Label '/rsm:CrossIndustryInvoice/rsm:ExchangedDocument/ram:IncludedNote', Locked = true;
+        BuyerTok: Label '/rsm:CrossIndustryInvoice/rsm:SupplyChainTradeTransaction/ram:ApplicableHeaderTradeAgreement/ram:BuyerTradeParty', Locked = true;
+        DeliveryTok: Label '/rsm:CrossIndustryInvoice/rsm:SupplyChainTradeTransaction/ram:ApplicableHeaderTradeDelivery', Locked = true;
+        ShipToTok: Label '/rsm:CrossIndustryInvoice/rsm:SupplyChainTradeTransaction/ram:ApplicableHeaderTradeDelivery/ram:ShipToTradeParty', Locked = true;
+        ShipFromTok: Label '/rsm:CrossIndustryInvoice/rsm:SupplyChainTradeTransaction/ram:ApplicableHeaderTradeDelivery/ram:ShipFromTradeParty', Locked = true;
+        SettlementTok: Label '/rsm:CrossIndustryInvoice/rsm:SupplyChainTradeTransaction/ram:ApplicableHeaderTradeSettlement', Locked = true;
+        InvoiceeTok: Label '/rsm:CrossIndustryInvoice/rsm:SupplyChainTradeTransaction/ram:ApplicableHeaderTradeSettlement/ram:InvoiceeTradeParty', Locked = true;
+        DiscountTermsTok: Label '/rsm:CrossIndustryInvoice/rsm:SupplyChainTradeTransaction/ram:ApplicableHeaderTradeSettlement/ram:SpecifiedTradePaymentTerms/ram:ApplicableTradePaymentDiscountTerms', Locked = true;
         XRechnungGuidelineIDTok: Label 'urn:cen.eu:en16931:2017#compliant#urn:xeinkauf.de:kosit:xrechnung_3.0', Locked = true;
         ExtendedGuidelineIDTok: Label 'urn:cen.eu:en16931:2017#conformant#urn:factur-x.eu:1p0:extended', Locked = true;
         IsInitialized: Boolean;
@@ -91,6 +99,8 @@ codeunit 13922 "ZUGFeRD XML Document Tests"
         OriginalCompanyUsesRegistrationNo: Boolean;
         OriginalCompanyVATRegistrationNo: Text[20];
         OriginalCompanyRegistrationNo: Text[20];
+        OriginalBillToSellToVATCalc: Enum "G/L Setup VAT Calculation";
+        OriginalPmtDiscExclVAT: Boolean;
 
     #region SalesInvoice
     [Test]
@@ -6037,6 +6047,368 @@ codeunit 13922 "ZUGFeRD XML Document Tests"
         Assert.ExpectedError('uses a line number that the document already has');
     end;
 
+    #region FP2 parties
+    [Test]
+    procedure ExtendedBuyerIsSellToAndInvoiceeIsBillToWhenVATIsCalculatedFromSellTo()
+    var
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] D-05/D-06: with "Bill-to/Sell-to VAT Calc." = Sell-to, the EXTENDED buyer is the sell-to customer
+        // whose VAT data was posted, and the other bill-to customer becomes the invoicee
+        Initialize();
+
+        // [GIVEN] G/L Setup calculates VAT from the sell-to customer
+        SetBillToSellToVATCalc(GeneralLedgerSetup."Bill-to/Sell-to VAT Calc."::"Sell-to/Buy-from No.");
+        // [GIVEN] A posted invoice whose bill-to customer differs from the sell-to customer
+        SalesInvoiceHeader.Get(CreateAndPostSalesInvoiceWithOtherBillToCustomer());
+        // [GIVEN] The EXTENDED profile
+        SetZUGFeRDProfile("ZUGFeRD Profile"::Extended);
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+
+        // [THEN] The buyer is the sell-to customer, the invoicee the bill-to customer with its VAT ID
+        Assert.AreEqual(SalesInvoiceHeader."Sell-to Customer Name", GetNodeByPathWithError(TempXMLBuffer, BuyerTok + '/ram:Name'), StrSubstNo(IncorrectValueErr, BuyerTok));
+        Assert.AreEqual(SalesInvoiceHeader."Bill-to Name", GetNodeByPathWithError(TempXMLBuffer, InvoiceeTok + '/ram:Name'), StrSubstNo(IncorrectValueErr, InvoiceeTok));
+        Assert.IsTrue(NodeExistsByPath(TempXMLBuffer, InvoiceeTok + '/ram:SpecifiedTaxRegistration/ram:ID'), 'The invoicee must carry the VAT ID of the bill-to customer');
+    end;
+
+    [Test]
+    procedure ExtendedBuyerIsBillToAndNoInvoiceeWhenVATIsCalculatedFromBillTo()
+    var
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] D-05/D-06: with "Bill-to/Sell-to VAT Calc." = Bill-to, the EXTENDED buyer stays the bill-to customer and no invoicee is written
+        Initialize();
+
+        // [GIVEN] G/L Setup calculates VAT from the bill-to customer, a posted invoice with another bill-to customer, the EXTENDED profile
+        SetBillToSellToVATCalc(GeneralLedgerSetup."Bill-to/Sell-to VAT Calc."::"Bill-to/Pay-to No.");
+        SalesInvoiceHeader.Get(CreateAndPostSalesInvoiceWithOtherBillToCustomer());
+        SetZUGFeRDProfile("ZUGFeRD Profile"::Extended);
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+
+        // [THEN] The buyer is the bill-to customer, there is no invoicee
+        Assert.AreEqual(SalesInvoiceHeader."Bill-to Name", GetNodeByPathWithError(TempXMLBuffer, BuyerTok + '/ram:Name'), StrSubstNo(IncorrectValueErr, BuyerTok));
+        VerifyNodeDoesNotExist(TempXMLBuffer, InvoiceeTok);
+    end;
+
+    [Test]
+    procedure XRechnungProfileKeepsBillToBuyerAndWritesNoInvoicee()
+    var
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] The buyer selection by VAT calculation applies to EXTENDED only; XRechnung keeps the bill-to customer
+        Initialize();
+
+        // [GIVEN] G/L Setup calculates VAT from the sell-to customer, a posted invoice with another bill-to customer, the XRechnung profile
+        SetBillToSellToVATCalc(GeneralLedgerSetup."Bill-to/Sell-to VAT Calc."::"Sell-to/Buy-from No.");
+        SalesInvoiceHeader.Get(CreateAndPostSalesInvoiceWithOtherBillToCustomer());
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+
+        // [THEN] The buyer is the bill-to customer, there is no invoicee
+        Assert.AreEqual(SalesInvoiceHeader."Bill-to Name", GetNodeByPathWithError(TempXMLBuffer, BuyerTok + '/ram:Name'), StrSubstNo(IncorrectValueErr, BuyerTok));
+        VerifyNodeDoesNotExist(TempXMLBuffer, InvoiceeTok);
+    end;
+
+    [Test]
+    procedure ExtendedShipToUsesShipToAddressAndContact()
+    var
+        SalesHeader: Record "Sales Header";
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] EXTENDED writes the deliver-to party (BG-13) from the ship-to fields, with the ship-to contact
+        Initialize();
+
+        // [GIVEN] A posted invoice whose ship-to name, address and contact differ from the sell-to data
+        CreateSalesHeader(SalesHeader, "Sales Document Type"::Invoice);
+        SalesHeader.Validate("Ship-to Name", LibraryUtility.GenerateGUID());
+        SalesHeader.Validate("Ship-to Address", LibraryUtility.GenerateGUID());
+        SalesHeader.Validate("Ship-to Contact", LibraryUtility.GenerateGUID());
+        SalesHeader.Modify(true);
+        CreateSalesLine(SalesHeader, Enum::"Sales Line Type"::Item, false);
+        SalesInvoiceHeader.Get(LibrarySales.PostSalesDocument(SalesHeader, true, true));
+        // [GIVEN] The EXTENDED profile
+        SetZUGFeRDProfile("ZUGFeRD Profile"::Extended);
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+
+        // [THEN] Name, address and contact of the ship-to party come from the ship-to fields
+        Assert.AreEqual(SalesInvoiceHeader."Ship-to Name", GetNodeByPathWithError(TempXMLBuffer, ShipToTok + '/ram:Name'), StrSubstNo(IncorrectValueErr, ShipToTok));
+        Assert.AreEqual(SalesInvoiceHeader."Ship-to Address", GetNodeByPathWithError(TempXMLBuffer, ShipToTok + '/ram:PostalTradeAddress/ram:LineOne'), StrSubstNo(IncorrectValueErr, ShipToTok));
+        Assert.AreEqual(SalesInvoiceHeader."Ship-to Contact", GetNodeByPathWithError(TempXMLBuffer, ShipToTok + '/ram:DefinedTradeContact/ram:PersonName'), StrSubstNo(IncorrectValueErr, ShipToTok));
+    end;
+
+    [Test]
+    procedure ExtendedShipFromIsLocationWithOwnAddress()
+    var
+        Location: Record Location;
+        SalesHeader: Record "Sales Header";
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] EXTENDED writes the ship-from party (BG-X-30) from the location when its address differs from the seller's
+        Initialize();
+
+        // [GIVEN] A location with its own address and a posted invoice from that location (G/L line, no inventory needed)
+        CreateLocationWithAddress(Location);
+        CreateSalesHeader(SalesHeader, "Sales Document Type"::Invoice);
+        SalesHeader.Validate("Location Code", Location.Code);
+        SalesHeader.Modify(true);
+        CreateSalesLine(SalesHeader, Enum::"Sales Line Type"::"G/L Account", false);
+        SalesInvoiceHeader.Get(LibrarySales.PostSalesDocument(SalesHeader, true, true));
+        // [GIVEN] The EXTENDED profile
+        SetZUGFeRDProfile("ZUGFeRD Profile"::Extended);
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+
+        // [THEN] The ship-from party carries name and address of the location
+        Assert.AreEqual(Location.Name, GetNodeByPathWithError(TempXMLBuffer, ShipFromTok + '/ram:Name'), StrSubstNo(IncorrectValueErr, ShipFromTok));
+        Assert.AreEqual(Location.Address, GetNodeByPathWithError(TempXMLBuffer, ShipFromTok + '/ram:PostalTradeAddress/ram:LineOne'), StrSubstNo(IncorrectValueErr, ShipFromTok));
+    end;
+    #endregion
+
+    #region FP0 fixes
+    [Test]
+    procedure InvoiceWithoutShipmentDateHasNoDeliveryDate()
+    var
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] CII R74: without a shipment date the delivery date is omitted instead of written as 17530101
+        Initialize();
+
+        // [GIVEN] A posted invoice without shipment date
+        SalesInvoiceHeader.Get(CreateAndPostSalesDocument("Sales Document Type"::Invoice, Enum::"Sales Line Type"::Item, false));
+        SalesInvoiceHeader."Shipment Date" := 0D;
+        SalesInvoiceHeader.Modify(false);
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+
+        // [THEN] No actual delivery event
+        VerifyNodeDoesNotExist(TempXMLBuffer, DeliveryTok + '/ram:ActualDeliverySupplyChainEvent');
+    end;
+
+    [Test]
+    procedure BuyerCountryIsAddressCountryNotVATCountry()
+    var
+        CountryRegion: Record "Country/Region";
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] BT-55 is the country of the buyer's address; the VAT country of the posting can differ
+        Initialize();
+
+        // [GIVEN] A posted invoice with a domestic bill-to address and another VAT country
+        SalesInvoiceHeader.Get(CreateAndPostSalesDocument("Sales Document Type"::Invoice, Enum::"Sales Line Type"::Item, false));
+        LibraryERM.CreateCountryRegion(CountryRegion);
+        SalesInvoiceHeader."Bill-to Country/Region Code" := CompanyInformation."Country/Region Code";
+        SalesInvoiceHeader."VAT Country/Region Code" := CountryRegion.Code;
+        SalesInvoiceHeader.Modify(false);
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+
+        // [THEN] The buyer's country is the ISO code of the bill-to country
+        CountryRegion.Get(CompanyInformation."Country/Region Code");
+        Assert.AreEqual(CountryRegion."ISO Code", GetNodeByPathWithError(TempXMLBuffer, BuyerTok + '/ram:PostalTradeAddress/ram:CountryID'), StrSubstNo(IncorrectValueErr, BuyerTok));
+    end;
+
+    [Test]
+    procedure VATBreakdownSeparatesCategoriesWithTheSameRate()
+    var
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        SalesInvoiceLine: Record "Sales Invoice Line";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] D-15: lines with the same VAT rate but different VAT categories get one VAT breakdown each
+        Initialize();
+
+        // [GIVEN] A posted invoice with two lines at the same VAT rate, the second one in another VAT category
+        SalesInvoiceHeader.Get(CreateAndPostSalesDocumentWithTwoLines("Sales Document Type"::Invoice, Enum::"Sales Line Type"::Item, false));
+        SalesInvoiceLine.SetRange("Document No.", SalesInvoiceHeader."No.");
+        SalesInvoiceLine.FindLast();
+        SalesInvoiceLine."Tax Category" := 'AE';
+        SalesInvoiceLine.Modify(false);
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+
+        // [THEN] Two VAT breakdowns, the second one for category AE with the basis of the second line
+        Assert.AreEqual(2, CountNodesByPath(TempXMLBuffer, HeaderTradeTaxTok), 'Number of VAT breakdowns');
+        Assert.AreEqual('AE', GetLastNodeByPathWithError(TempXMLBuffer, HeaderTradeTaxTok + '/ram:CategoryCode'), StrSubstNo(IncorrectValueErr, HeaderTradeTaxTok));
+        Assert.AreEqual(ExportZUGFeRDDocument.FormatDecimal(SalesInvoiceLine.Amount), GetLastNodeByPathWithError(TempXMLBuffer, HeaderTradeTaxTok + '/ram:BasisAmount'), StrSubstNo(IncorrectValueErr, HeaderTradeTaxTok));
+    end;
+    #endregion
+
+    #region FP3 payment
+    [Test]
+    procedure ExtendedInvoiceWritesPaymentDiscountTerms()
+    var
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] EXTENDED writes the payment discount (BT-X-282..287) from the posted invoice and its ledger entry
+        Initialize();
+
+        // [GIVEN] The discount base includes VAT
+        SetPmtDiscExclVAT(false);
+        // [GIVEN] A posted invoice with payment terms that grant a payment discount
+        SalesInvoiceHeader.Get(CreateAndPostSalesInvoiceWithPaymentDiscount());
+        // [GIVEN] The EXTENDED profile
+        SetZUGFeRDProfile("ZUGFeRD Profile"::Extended);
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+
+        // [THEN] Basis date = document date, period = days until the discount date, percentage, base incl. VAT and the posted discount
+        SalesInvoiceHeader.CalcFields("Amount Including VAT");
+        CustLedgerEntry.SetRange("Document Type", CustLedgerEntry."Document Type"::Invoice);
+        CustLedgerEntry.SetRange("Document No.", SalesInvoiceHeader."No.");
+        CustLedgerEntry.FindFirst();
+        Assert.AreEqual(FormatDate(SalesInvoiceHeader."Document Date"), GetNodeByPathWithError(TempXMLBuffer, DiscountTermsTok + '/ram:BasisDateTime/udt:DateTimeString'), StrSubstNo(IncorrectValueErr, DiscountTermsTok));
+        Assert.AreEqual(Format(SalesInvoiceHeader."Pmt. Discount Date" - SalesInvoiceHeader."Document Date"), GetNodeByPathWithError(TempXMLBuffer, DiscountTermsTok + '/ram:BasisPeriodMeasure'), StrSubstNo(IncorrectValueErr, DiscountTermsTok));
+        Assert.AreEqual(ExportZUGFeRDDocument.FormatFiveDecimal(SalesInvoiceHeader."Payment Discount %"), GetNodeByPathWithError(TempXMLBuffer, DiscountTermsTok + '/ram:CalculationPercent'), StrSubstNo(IncorrectValueErr, DiscountTermsTok));
+        Assert.AreEqual(ExportZUGFeRDDocument.FormatDecimal(SalesInvoiceHeader."Amount Including VAT"), GetNodeByPathWithError(TempXMLBuffer, DiscountTermsTok + '/ram:BasisAmount'), StrSubstNo(IncorrectValueErr, DiscountTermsTok));
+        Assert.AreEqual(ExportZUGFeRDDocument.FormatDecimal(CustLedgerEntry."Original Pmt. Disc. Possible"), GetNodeByPathWithError(TempXMLBuffer, DiscountTermsTok + '/ram:ActualDiscountAmount'), StrSubstNo(IncorrectValueErr, DiscountTermsTok));
+    end;
+
+    [Test]
+    procedure XRechnungProfileWritesNoPaymentDiscountTerms()
+    var
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] The structured payment discount exists in EXTENDED only
+        Initialize();
+
+        // [GIVEN] A posted invoice with payment discount and the XRechnung profile
+        SalesInvoiceHeader.Get(CreateAndPostSalesInvoiceWithPaymentDiscount());
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+
+        // [THEN] No discount terms
+        VerifyNodeDoesNotExist(TempXMLBuffer, DiscountTermsTok);
+    end;
+
+    [Test]
+    procedure ExtendedInvoiceWritesPaymentReferenceMeansTextAndAccountName()
+    var
+        PaymentMethod: Record "Payment Method";
+        SalesHeader: Record "Sales Header";
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        TempXMLBuffer: Record "XML Buffer" temporary;
+    begin
+        // [SCENARIO] EXTENDED writes the remittance information (BT-83), the payment means text (BT-82) and the account name (BT-85)
+        Initialize();
+
+        // [GIVEN] A posted invoice paid by credit transfer (payment means code 58)
+        PaymentMethod.Get(LibraryEDocDE.CreatePaymentMethodWithMeansCode('58'));
+        PaymentMethod.Description := CopyStr(LibraryUtility.GenerateGUID(), 1, MaxStrLen(PaymentMethod.Description));
+        PaymentMethod.Modify(false);
+        CreateSalesHeader(SalesHeader, "Sales Document Type"::Invoice);
+        SalesHeader.Validate("Payment Method Code", PaymentMethod.Code);
+        SalesHeader.Modify(true);
+        CreateSalesLine(SalesHeader, Enum::"Sales Line Type"::Item, false);
+        SalesInvoiceHeader.Get(LibrarySales.PostSalesDocument(SalesHeader, true, true));
+        // [GIVEN] The EXTENDED profile
+        SetZUGFeRDProfile("ZUGFeRD Profile"::Extended);
+
+        // [WHEN] Export ZUGFeRD Electronic Document.
+        ExportInvoice(SalesInvoiceHeader, TempXMLBuffer);
+
+        // [THEN] Payment reference = invoice no. (no own payment reference), payment means text = payment method, account name = company name
+        Assert.AreEqual(SalesInvoiceHeader."No.", GetNodeByPathWithError(TempXMLBuffer, SettlementTok + '/ram:PaymentReference'), StrSubstNo(IncorrectValueErr, SettlementTok));
+        Assert.AreEqual(PaymentMethod.Description, GetNodeByPathWithError(TempXMLBuffer, SettlementTok + '/ram:SpecifiedTradeSettlementPaymentMeans/ram:Information'), StrSubstNo(IncorrectValueErr, SettlementTok));
+        Assert.AreEqual(CompanyInformation.Name, GetNodeByPathWithError(TempXMLBuffer, SettlementTok + '/ram:SpecifiedTradeSettlementPaymentMeans/ram:PayeePartyCreditorFinancialAccount/ram:AccountName'), StrSubstNo(IncorrectValueErr, SettlementTok));
+    end;
+    #endregion
+
+    local procedure CreateAndPostSalesInvoiceWithOtherBillToCustomer(): Code[20]
+    var
+        BillToCustomer: Record Customer;
+        SalesHeader: Record "Sales Header";
+    begin
+        // CreateCustomer deletes all customers, so the bill-to customer is created afterwards.
+        CreateSalesHeader(SalesHeader, "Sales Document Type"::Invoice);
+        LibrarySales.CreateCustomerWithAddress(BillToCustomer);
+        BillToCustomer.Validate(Name, LibraryUtility.GenerateGUID());
+        BillToCustomer.Validate("Country/Region Code", CompanyInformation."Country/Region Code");
+        BillToCustomer.Validate("VAT Registration No.", LibraryERM.GenerateVATRegistrationNo(BillToCustomer."Country/Region Code"));
+        BillToCustomer.Modify(true);
+        // Without UI the confirmation "change Bill-to Customer No.?" answers No and keeps the old customer.
+        SalesHeader.SetHideValidationDialog(true);
+        SalesHeader.Validate("Bill-to Customer No.", BillToCustomer."No.");
+        SalesHeader.Modify(true);
+        CreateSalesLine(SalesHeader, Enum::"Sales Line Type"::Item, false);
+        exit(LibrarySales.PostSalesDocument(SalesHeader, true, true));
+    end;
+
+    local procedure CreateAndPostSalesInvoiceWithPaymentDiscount(): Code[20]
+    var
+        PaymentTerms: Record "Payment Terms";
+        SalesHeader: Record "Sales Header";
+    begin
+        LibraryERM.CreatePaymentTermsDiscount(PaymentTerms, false);
+        CreateSalesHeader(SalesHeader, "Sales Document Type"::Invoice);
+        SalesHeader.Validate("Payment Terms Code", PaymentTerms.Code);
+        // Pinned: the export reads the posted percentage and discount date, not the payment terms.
+        SalesHeader.Validate("Payment Discount %", PaymentTerms."Discount %");
+        SalesHeader.Validate("Pmt. Discount Date", CalcDate(PaymentTerms."Discount Date Calculation", SalesHeader."Document Date"));
+        SalesHeader.Modify(true);
+        CreateSalesLine(SalesHeader, Enum::"Sales Line Type"::Item, false);
+        exit(LibrarySales.PostSalesDocument(SalesHeader, true, true));
+    end;
+
+    local procedure CreateLocationWithAddress(var Location: Record Location)
+    var
+        LibraryWarehouse: Codeunit "Library - Warehouse";
+    begin
+        LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+        Location.Name := CopyStr(LibraryUtility.GenerateGUID(), 1, MaxStrLen(Location.Name));
+        Location.Address := CopyStr(LibraryUtility.GenerateGUID(), 1, MaxStrLen(Location.Address));
+        Location.City := CopyStr(LibraryUtility.GenerateGUID(), 1, MaxStrLen(Location.City));
+        Location."Post Code" := CopyStr(LibraryUtility.GenerateGUID(), 1, MaxStrLen(Location."Post Code"));
+        Location."Country/Region Code" := CompanyInformation."Country/Region Code";
+        Location.Modify(false);
+    end;
+
+    local procedure SetBillToSellToVATCalc(BillToSellToVATCalc: Enum "G/L Setup VAT Calculation")
+    begin
+        GeneralLedgerSetup.Get();
+        GeneralLedgerSetup."Bill-to/Sell-to VAT Calc." := BillToSellToVATCalc;
+        GeneralLedgerSetup.Modify(false);
+    end;
+
+    local procedure SetPmtDiscExclVAT(PmtDiscExclVAT: Boolean)
+    begin
+        GeneralLedgerSetup.Get();
+        GeneralLedgerSetup."Pmt. Disc. Excl. VAT" := PmtDiscExclVAT;
+        GeneralLedgerSetup.Modify(false);
+    end;
+
+    local procedure RestoreGeneralLedgerSetup()
+    begin
+        GeneralLedgerSetup.Get();
+        if (GeneralLedgerSetup."Bill-to/Sell-to VAT Calc." = OriginalBillToSellToVATCalc) and (GeneralLedgerSetup."Pmt. Disc. Excl. VAT" = OriginalPmtDiscExclVAT) then
+            exit;
+        GeneralLedgerSetup."Bill-to/Sell-to VAT Calc." := OriginalBillToSellToVATCalc;
+        GeneralLedgerSetup."Pmt. Disc. Excl. VAT" := OriginalPmtDiscExclVAT;
+        GeneralLedgerSetup.Modify(false);
+    end;
+
     local procedure VerifySubLineScenario(var TempXMLBuffer: Record "XML Buffer" temporary; FirstLineNo: Integer; DocumentAmount: Decimal; DocumentAmountInclVAT: Decimal; UsedPartAmount: Decimal; UsedPartAmountInclVAT: Decimal; DespatchAdviceNo: Code[20])
     var
         GrandTotalAmount: Decimal;
@@ -6108,6 +6480,7 @@ codeunit 13922 "ZUGFeRD XML Document Tests"
             RestoreCompanyIdentifiers();
             SetZUGFeRDProfile("ZUGFeRD Profile"::XRechnung);
             LibraryEDocDE.ResetZUGFeRDScenario();
+            RestoreGeneralLedgerSetup();
             exit;
         end;
         LibraryTestInitialize.OnBeforeTestSuiteInitialize(Codeunit::"ZUGFeRD XML Document Tests");
@@ -6125,6 +6498,8 @@ codeunit 13922 "ZUGFeRD XML Document Tests"
         CompanyInformation."Phone No." := Format(LibraryRandom.RandIntInRange(1000000, 9999999));
         CompanyInformation.Modify();
         GeneralLedgerSetup.Get();
+        OriginalBillToSellToVATCalc := GeneralLedgerSetup."Bill-to/Sell-to VAT Calc.";
+        OriginalPmtDiscExclVAT := GeneralLedgerSetup."Pmt. Disc. Excl. VAT";
         EDocumentService.DeleteAll();
         EDocumentService.Get(LibraryEdocument.CreateService("E-Document Format"::ZUGFeRD, "Service Integration"::"No Integration"));
         Commit();

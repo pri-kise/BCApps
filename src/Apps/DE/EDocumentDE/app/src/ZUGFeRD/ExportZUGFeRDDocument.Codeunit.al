@@ -9,6 +9,7 @@ using Microsoft.Bank.DirectDebit;
 using Microsoft.CRM.Team;
 using Microsoft.eServices.EDocument;
 using Microsoft.Finance.Currency;
+using Microsoft.Finance.GeneralLedger.Journal;
 using Microsoft.Finance.GeneralLedger.Setup;
 using Microsoft.Finance.VAT.Setup;
 using Microsoft.Foundation.Address;
@@ -21,6 +22,7 @@ using Microsoft.Inventory.Location;
 using Microsoft.Peppol;
 using Microsoft.Sales.Customer;
 using Microsoft.Sales.History;
+using Microsoft.Sales.Receivables;
 using Microsoft.Service.History;
 using System.IO;
 using System.Reflection;
@@ -61,6 +63,13 @@ codeunit 13917 "Export ZUGFeRD Document"
 #endif
         DocumentLanguageCode: Code[10];
         CurrentZUGFeRDProfile: Enum "ZUGFeRD Profile";
+        VATBreakdownKeys: List of [Text];
+        VATBreakdownBasisAmounts: Dictionary of [Text, Decimal];
+        VATBreakdownVATAmounts: Dictionary of [Text, Decimal];
+        VATBreakdownCategories: Dictionary of [Text, Text];
+        VATBreakdownRates: Dictionary of [Text, Decimal];
+        VATBreakdownBusPostingGroups: Dictionary of [Text, Code[20]];
+        VATBreakdownProdPostingGroups: Dictionary of [Text, Code[20]];
         XRechnungGuidelineIDTok: Label 'urn:cen.eu:en16931:2017#compliant#urn:xeinkauf.de:kosit:xrechnung_3.0', Locked = true;
         ExtendedGuidelineIDTok: Label 'urn:cen.eu:en16931:2017#conformant#urn:factur-x.eu:1p0:extended', Locked = true;
         XRechnungAttachmentNameTok: Label 'xrechnung.xml', Locked = true;
@@ -603,7 +612,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         HeaderRecordRef: RecordRef;
         HeaderTradeAgreementElement, SellerTradePartyElement, BuyerTradePartyElement, SpecifiedTaxRegistrationElement, IDElement : XmlElement;
         SellerOrderReferencedDocumentElement, BuyerOrderReferencedDocumentElement : XmlElement;
-        PostalTradeAddressElement, ContactElement, BuyerLegalOrganizationElement : XmlElement;
+        ContactElement, BuyerLegalOrganizationElement : XmlElement;
         SellerIDAttr, BuyerIDAttr : XmlAttribute;
         CustomerNo: Code[20];
         CustomerGLN: Code[13];
@@ -613,6 +622,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         PostCode: Text[20];
         City: Text[50];
         CountryCode: Code[10];
+        AddressCountryCode: Code[10];
         VATRegistrationNo: Text[20];
         CustomerRegistrationNo: Text[50];
         YourReference: Text[35];
@@ -643,6 +653,16 @@ codeunit 13917 "Export ZUGFeRD Document"
                     Address2 := SalesInvoiceHeader."Bill-to Address 2";
                     PostCode := SalesInvoiceHeader."Bill-to Post Code";
                     City := SalesInvoiceHeader."Bill-to City";
+                    AddressCountryCode := SalesInvoiceHeader."Bill-to Country/Region Code";
+                    if UseSellToAsBuyer() then begin
+                        CustomerNo := SalesInvoiceHeader."Sell-to Customer No.";
+                        CustomerName := SalesInvoiceHeader."Sell-to Customer Name";
+                        Address := SalesInvoiceHeader."Sell-to Address";
+                        Address2 := SalesInvoiceHeader."Sell-to Address 2";
+                        PostCode := SalesInvoiceHeader."Sell-to Post Code";
+                        City := SalesInvoiceHeader."Sell-to City";
+                        AddressCountryCode := SalesInvoiceHeader."Sell-to Country/Region Code";
+                    end;
                     CountryCode := SalesInvoiceHeader."VAT Country/Region Code";
                     VATRegistrationNo := SalesInvoiceHeader."VAT Registration No.";
                     YourReference := SalesInvoiceHeader."Your Reference";
@@ -664,6 +684,16 @@ codeunit 13917 "Export ZUGFeRD Document"
                     Address2 := SalesCrMemoHeader."Bill-to Address 2";
                     PostCode := SalesCrMemoHeader."Bill-to Post Code";
                     City := SalesCrMemoHeader."Bill-to City";
+                    AddressCountryCode := SalesCrMemoHeader."Bill-to Country/Region Code";
+                    if UseSellToAsBuyer() then begin
+                        CustomerNo := SalesCrMemoHeader."Sell-to Customer No.";
+                        CustomerName := SalesCrMemoHeader."Sell-to Customer Name";
+                        Address := SalesCrMemoHeader."Sell-to Address";
+                        Address2 := SalesCrMemoHeader."Sell-to Address 2";
+                        PostCode := SalesCrMemoHeader."Sell-to Post Code";
+                        City := SalesCrMemoHeader."Sell-to City";
+                        AddressCountryCode := SalesCrMemoHeader."Sell-to Country/Region Code";
+                    end;
                     CountryCode := SalesCrMemoHeader."VAT Country/Region Code";
                     VATRegistrationNo := SalesCrMemoHeader."VAT Registration No.";
                     YourReference := SalesCrMemoHeader."Your Reference";
@@ -687,7 +717,8 @@ codeunit 13917 "Export ZUGFeRD Document"
                 CustomerRegistrationNo := Customer."Registration Number";
         end;
         HeaderTradeAgreementElement := XmlElement.Create('ApplicableHeaderTradeAgreement', XmlNamespaceRAM);
-        HeaderTradeAgreementElement.Add(XmlElement.Create('BuyerReference', XmlNamespaceRAM, GetBuyerReference(RecordVariant)));
+        // CII R74: no empty elements. XRechnung requires BT-10; the check on release reports a missing value.
+        AddElementIfNotEmpty(HeaderTradeAgreementElement, 'BuyerReference', GetBuyerReference(RecordVariant));
 
         // Seller
         SellerTradePartyElement := XmlElement.Create('SellerTradeParty', XmlNamespaceRAM);
@@ -700,7 +731,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         // Seller Contact
         if SellerPhoneNumber <> '' then begin
             ContactElement := XmlElement.Create('DefinedTradeContact', XmlNamespaceRAM);
-            ContactElement.Add(XmlElement.Create('PersonName', XmlNamespaceRAM, SellerContactName));
+            AddElementIfNotEmpty(ContactElement, 'PersonName', SellerContactName);
             ContactElement.Add(XmlElement.Create('TelephoneUniversalCommunication', XmlNamespaceRAM,
                 XmlElement.Create('CompleteNumber', XmlNamespaceRAM, SellerPhoneNumber)));
             if SellerEmailAddress <> '' then
@@ -710,14 +741,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         end;
 
         // Seller Address
-        PostalTradeAddressElement := XmlElement.Create('PostalTradeAddress', XmlNamespaceRAM);
-        PostalTradeAddressElement.Add(XmlElement.Create('PostcodeCode', XmlNamespaceRAM, SellerPostalZone));
-        PostalTradeAddressElement.Add(XmlElement.Create('LineOne', XmlNamespaceRAM, SellerStreetName));
-        if SellerAdditionalStreetName <> '' then
-            PostalTradeAddressElement.Add(XmlElement.Create('LineTwo', XmlNamespaceRAM, SellerAdditionalStreetName));
-        PostalTradeAddressElement.Add(XmlElement.Create('CityName', XmlNamespaceRAM, SellerCityName));
-        PostalTradeAddressElement.Add(XmlElement.Create('CountryID', XmlNamespaceRAM, GetCountryISOCode(SellerCountryCode)));
-        SellerTradePartyElement.Add(PostalTradeAddressElement);
+        SellerTradePartyElement.Add(CreatePostalTradeAddressElement(SellerPostalZone, SellerStreetName, SellerAdditionalStreetName, SellerCityName, SellerCountryCode, ''));
 
         //Seller E-Mail
         if CompanyInformation."E-Mail" <> '' then
@@ -758,15 +782,8 @@ codeunit 13917 "Export ZUGFeRD Document"
         // Buyer Contact
         InsertBuyerContact(BuyerTradePartyElement, Contact, PhoneNumber, CustomerEmail);
 
-        // Buyer Address
-        PostalTradeAddressElement := XmlElement.Create('PostalTradeAddress', XmlNamespaceRAM);
-        PostalTradeAddressElement.Add(XmlElement.Create('PostcodeCode', XmlNamespaceRAM, PostCode));
-        PostalTradeAddressElement.Add(XmlElement.Create('LineOne', XmlNamespaceRAM, Address));
-        if Address2 <> '' then
-            PostalTradeAddressElement.Add(XmlElement.Create('LineTwo', XmlNamespaceRAM, Address2));
-        PostalTradeAddressElement.Add(XmlElement.Create('CityName', XmlNamespaceRAM, City));
-        PostalTradeAddressElement.Add(XmlElement.Create('CountryID', XmlNamespaceRAM, GetCountryISOCode(GetCountryRegionCode(CountryCode))));
-        BuyerTradePartyElement.Add(PostalTradeAddressElement);
+        // Buyer Address. BT-55 is the country of the address; the VAT country (prefix of BT-48) can differ.
+        BuyerTradePartyElement.Add(CreatePostalTradeAddressElement(PostCode, Address, Address2, City, GetCountryRegionCode(AddressCountryCode), ''));
 
         // Buyer E-Mail
         if CustomerEmail <> '' then
@@ -801,28 +818,21 @@ codeunit 13917 "Export ZUGFeRD Document"
 
     local procedure InsertApplicableHeaderTradeDelivery(var RootXMLNode: XmlElement; SalesInvoiceHeader: Record "Sales Invoice Header")
     var
-        DeliveryElement, ShipToPartyElement, PostalAddressElement, ActualDeliveryDateElement, OccurrenceDateTimeElement : XmlElement;
+        DeliveryElement: XmlElement;
     begin
         DeliveryElement := XmlElement.Create('ApplicableHeaderTradeDelivery', XmlNamespaceRAM);
 
-        ShipToPartyElement := XmlElement.Create('ShipToTradeParty', XmlNamespaceRAM);
-        InsertDeliveryGLN(ShipToPartyElement, SalesInvoiceHeader."Sell-to Customer No.", SalesInvoiceHeader."Ship-to Code");
-        ShipToPartyElement.Add(XmlElement.Create('Name', XmlNamespaceRAM, SalesInvoiceHeader."Sell-to Customer Name"));
-
-        PostalAddressElement := XmlElement.Create('PostalTradeAddress', XmlNamespaceRAM);
-        PostalAddressElement.Add(XmlElement.Create('PostcodeCode', XmlNamespaceRAM, SalesInvoiceHeader."Sell-to Post Code"));
-        PostalAddressElement.Add(XmlElement.Create('LineOne', XmlNamespaceRAM, SalesInvoiceHeader."Sell-to Address"));
-        PostalAddressElement.Add(XmlElement.Create('CityName', XmlNamespaceRAM, SalesInvoiceHeader."Sell-to City"));
-        PostalAddressElement.Add(XmlElement.Create('CountryID', XmlNamespaceRAM, GetCountryISOCode(GetCountryRegionCode(SalesInvoiceHeader."Sell-to Country/Region Code"))));
-
-        ShipToPartyElement.Add(PostalAddressElement);
-        DeliveryElement.Add(ShipToPartyElement);
-
-        ActualDeliveryDateElement := XmlElement.Create('ActualDeliverySupplyChainEvent', XmlNamespaceRAM);
-        OccurrenceDateTimeElement := XmlElement.Create('OccurrenceDateTime', XmlNamespaceRAM);
-        OccurrenceDateTimeElement.Add(XmlElement.Create('DateTimeString', XmlNamespaceUDT, XmlAttribute.Create('format', '102'), FormatDate(SalesInvoiceHeader."Shipment Date")));
-        ActualDeliveryDateElement.Add(OccurrenceDateTimeElement);
-        DeliveryElement.Add(ActualDeliveryDateElement);
+        if CurrentZUGFeRDProfile = CurrentZUGFeRDProfile::Extended then begin
+            InsertShipToTradeParty(DeliveryElement, SalesInvoiceHeader."Sell-to Customer No.", SalesInvoiceHeader."Ship-to Code", SalesInvoiceHeader."Ship-to Name",
+                SalesInvoiceHeader."Ship-to Address", SalesInvoiceHeader."Ship-to Address 2", SalesInvoiceHeader."Ship-to Post Code", SalesInvoiceHeader."Ship-to City",
+                SalesInvoiceHeader."Ship-to Country/Region Code", SalesInvoiceHeader."Ship-to County", SalesInvoiceHeader."Ship-to Contact", SalesInvoiceHeader."Ship-to Phone No.");
+            InsertShipFromTradeParty(DeliveryElement, SalesInvoiceHeader."Location Code");
+        end else
+            // XRechnung profile: unchanged sell-to address. The ship-to fix for all profiles is in PR #12462 / #12268.
+            InsertShipToTradeParty(DeliveryElement, SalesInvoiceHeader."Sell-to Customer No.", SalesInvoiceHeader."Ship-to Code", SalesInvoiceHeader."Sell-to Customer Name",
+                SalesInvoiceHeader."Sell-to Address", '', SalesInvoiceHeader."Sell-to Post Code", SalesInvoiceHeader."Sell-to City",
+                SalesInvoiceHeader."Sell-to Country/Region Code", '', '', '');
+        InsertActualDeliveryDate(DeliveryElement, SalesInvoiceHeader."Shipment Date");
 
         RaiseOnAfterInsertApplicableHeaderTradeDelivery(DeliveryElement, SalesInvoiceHeader);
         RootXMLNode.Add(DeliveryElement);
@@ -830,31 +840,145 @@ codeunit 13917 "Export ZUGFeRD Document"
 
     local procedure InsertApplicableHeaderTradeDelivery(var RootXMLNode: XmlElement; SalesCrMemoHeader: Record "Sales Cr.Memo Header")
     var
-        DeliveryElement, ShipToPartyElement, PostalAddressElement, ActualDeliveryDateElement, OccurrenceDateTimeElement : XmlElement;
+        DeliveryElement: XmlElement;
     begin
         DeliveryElement := XmlElement.Create('ApplicableHeaderTradeDelivery', XmlNamespaceRAM);
 
-        ShipToPartyElement := XmlElement.Create('ShipToTradeParty', XmlNamespaceRAM);
-        InsertDeliveryGLN(ShipToPartyElement, SalesCrMemoHeader."Sell-to Customer No.", SalesCrMemoHeader."Ship-to Code");
-        ShipToPartyElement.Add(XmlElement.Create('Name', XmlNamespaceRAM, SalesCrMemoHeader."Sell-to Customer Name"));
-
-        PostalAddressElement := XmlElement.Create('PostalTradeAddress', XmlNamespaceRAM);
-        PostalAddressElement.Add(XmlElement.Create('PostcodeCode', XmlNamespaceRAM, SalesCrMemoHeader."Sell-to Post Code"));
-        PostalAddressElement.Add(XmlElement.Create('LineOne', XmlNamespaceRAM, SalesCrMemoHeader."Sell-to Address"));
-        PostalAddressElement.Add(XmlElement.Create('CityName', XmlNamespaceRAM, SalesCrMemoHeader."Sell-to City"));
-        PostalAddressElement.Add(XmlElement.Create('CountryID', XmlNamespaceRAM, GetCountryISOCode(GetCountryRegionCode(SalesCrMemoHeader."Sell-to Country/Region Code"))));
-
-        ShipToPartyElement.Add(PostalAddressElement);
-        DeliveryElement.Add(ShipToPartyElement);
-
-        ActualDeliveryDateElement := XmlElement.Create('ActualDeliverySupplyChainEvent', XmlNamespaceRAM);
-        OccurrenceDateTimeElement := XmlElement.Create('OccurrenceDateTime', XmlNamespaceRAM);
-        OccurrenceDateTimeElement.Add(XmlElement.Create('DateTimeString', XmlNamespaceUDT, XmlAttribute.Create('format', '102'), FormatDate(SalesCrMemoHeader."Shipment Date")));
-        ActualDeliveryDateElement.Add(OccurrenceDateTimeElement);
-        DeliveryElement.Add(ActualDeliveryDateElement);
+        if CurrentZUGFeRDProfile = CurrentZUGFeRDProfile::Extended then begin
+            InsertShipToTradeParty(DeliveryElement, SalesCrMemoHeader."Sell-to Customer No.", SalesCrMemoHeader."Ship-to Code", SalesCrMemoHeader."Ship-to Name",
+                SalesCrMemoHeader."Ship-to Address", SalesCrMemoHeader."Ship-to Address 2", SalesCrMemoHeader."Ship-to Post Code", SalesCrMemoHeader."Ship-to City",
+                SalesCrMemoHeader."Ship-to Country/Region Code", SalesCrMemoHeader."Ship-to County", SalesCrMemoHeader."Ship-to Contact", SalesCrMemoHeader."Ship-to Phone No.");
+            InsertShipFromTradeParty(DeliveryElement, SalesCrMemoHeader."Location Code");
+        end else
+            // XRechnung profile: unchanged sell-to address. The ship-to fix for all profiles is in PR #12462 / #12268.
+            InsertShipToTradeParty(DeliveryElement, SalesCrMemoHeader."Sell-to Customer No.", SalesCrMemoHeader."Ship-to Code", SalesCrMemoHeader."Sell-to Customer Name",
+                SalesCrMemoHeader."Sell-to Address", '', SalesCrMemoHeader."Sell-to Post Code", SalesCrMemoHeader."Sell-to City",
+                SalesCrMemoHeader."Sell-to Country/Region Code", '', '', '');
+        InsertActualDeliveryDate(DeliveryElement, SalesCrMemoHeader."Shipment Date");
 
         RaiseOnAfterInsertApplicableHeaderTradeDelivery(DeliveryElement, SalesCrMemoHeader);
         RootXMLNode.Add(DeliveryElement);
+    end;
+
+    /// <summary>
+    /// BG-13 deliver-to. The contact (DefinedTradeContact) and the county are EXTENDED only; callers pass them blank otherwise.
+    /// </summary>
+    local procedure InsertShipToTradeParty(var DeliveryElement: XmlElement; CustomerNo: Code[20]; ShipToCode: Code[10]; Name: Text; Address: Text; Address2: Text; PostCode: Text; City: Text; CountryRegionCode: Code[10]; County: Text; ContactName: Text; PhoneNo: Text)
+    var
+        ShipToPartyElement, ContactElement : XmlElement;
+    begin
+        ShipToPartyElement := XmlElement.Create('ShipToTradeParty', XmlNamespaceRAM);
+        InsertDeliveryGLN(ShipToPartyElement, CustomerNo, ShipToCode);
+        AddElementIfNotEmpty(ShipToPartyElement, 'Name', Name);
+        if (ContactName <> '') or (PhoneNo <> '') then begin
+            ContactElement := XmlElement.Create('DefinedTradeContact', XmlNamespaceRAM);
+            AddElementIfNotEmpty(ContactElement, 'PersonName', ContactName);
+            if PhoneNo <> '' then
+                ContactElement.Add(XmlElement.Create('TelephoneUniversalCommunication', XmlNamespaceRAM,
+                    XmlElement.Create('CompleteNumber', XmlNamespaceRAM, PhoneNo)));
+            ShipToPartyElement.Add(ContactElement);
+        end;
+        ShipToPartyElement.Add(CreatePostalTradeAddressElement(PostCode, Address, Address2, City, GetCountryRegionCode(CountryRegionCode), County));
+        DeliveryElement.Add(ShipToPartyElement);
+    end;
+
+    /// <summary>
+    /// BG-X-30 ship-from, EXTENDED only: the location the goods leave from, when its address differs from the seller's.
+    /// </summary>
+    local procedure InsertShipFromTradeParty(var DeliveryElement: XmlElement; LocationCode: Code[10])
+    var
+        Location: Record Location;
+        ShipFromPartyElement: XmlElement;
+    begin
+        if LocationCode = '' then
+            exit;
+        Location.SetLoadFields(Name, Address, "Address 2", "Post Code", City, "Country/Region Code", County);
+        if not Location.Get(LocationCode) then
+            exit;
+        if Location.Address = '' then
+            exit;
+        if (Location.Address = CompanyInformation.Address) and (Location."Post Code" = CompanyInformation."Post Code") and (Location.City = CompanyInformation.City) then
+            exit;
+        ShipFromPartyElement := XmlElement.Create('ShipFromTradeParty', XmlNamespaceRAM);
+        AddElementIfNotEmpty(ShipFromPartyElement, 'Name', Location.Name);
+        ShipFromPartyElement.Add(CreatePostalTradeAddressElement(Location."Post Code", Location.Address, Location."Address 2", Location.City, GetCountryRegionCode(Location."Country/Region Code"), Location.County));
+        DeliveryElement.Add(ShipFromPartyElement);
+    end;
+
+    local procedure InsertActualDeliveryDate(var DeliveryElement: XmlElement; ShipmentDate: Date)
+    var
+        ActualDeliveryDateElement, OccurrenceDateTimeElement : XmlElement;
+    begin
+        // CII R74: without a shipment date no delivery date, instead of the placeholder 17530101.
+        if ShipmentDate = 0D then
+            exit;
+        ActualDeliveryDateElement := XmlElement.Create('ActualDeliverySupplyChainEvent', XmlNamespaceRAM);
+        OccurrenceDateTimeElement := XmlElement.Create('OccurrenceDateTime', XmlNamespaceRAM);
+        OccurrenceDateTimeElement.Add(XmlElement.Create('DateTimeString', XmlNamespaceUDT, XmlAttribute.Create('format', '102'), FormatDate(ShipmentDate)));
+        ActualDeliveryDateElement.Add(OccurrenceDateTimeElement);
+        DeliveryElement.Add(ActualDeliveryDateElement);
+    end;
+
+    /// <summary>
+    /// Postal address (BG-5, BG-8, BG-15, …). CII R74: empty parts are not written; CountryID is mandatory.
+    /// </summary>
+    local procedure CreatePostalTradeAddressElement(PostCode: Text; LineOne: Text; LineTwo: Text; City: Text; CountryRegionCode: Code[10]; County: Text) PostalTradeAddressElement: XmlElement
+    begin
+        PostalTradeAddressElement := XmlElement.Create('PostalTradeAddress', XmlNamespaceRAM);
+        AddElementIfNotEmpty(PostalTradeAddressElement, 'PostcodeCode', PostCode);
+        AddElementIfNotEmpty(PostalTradeAddressElement, 'LineOne', LineOne);
+        AddElementIfNotEmpty(PostalTradeAddressElement, 'LineTwo', LineTwo);
+        AddElementIfNotEmpty(PostalTradeAddressElement, 'CityName', City);
+        PostalTradeAddressElement.Add(XmlElement.Create('CountryID', XmlNamespaceRAM, GetCountryISOCode(CountryRegionCode)));
+        AddElementIfNotEmpty(PostalTradeAddressElement, 'CountrySubDivisionName', County);
+    end;
+
+    local procedure AddElementIfNotEmpty(var ParentElement: XmlElement; ElementName: Text; Value: Text)
+    begin
+        if Value = '' then
+            exit;
+        ParentElement.Add(XmlElement.Create(ElementName, XmlNamespaceRAM, Value));
+    end;
+
+    /// <summary>
+    /// Decision D-05 (proposal, open): in EXTENDED the buyer (BG-7) is the customer whose VAT data was posted, as
+    /// G/L Setup "Bill-to/Sell-to VAT Calc." selects it. BR-IC-02 / BR-AE-02 check the buyer's VAT ID (BT-48).
+    /// The XRechnung profile keeps the bill-to customer.
+    /// </summary>
+    local procedure UseSellToAsBuyer(): Boolean
+    begin
+        if CurrentZUGFeRDProfile <> CurrentZUGFeRDProfile::Extended then
+            exit(false);
+        exit(GeneralLedgerSetup."Bill-to/Sell-to VAT Calc." = GeneralLedgerSetup."Bill-to/Sell-to VAT Calc."::"Sell-to/Buy-from No.");
+    end;
+
+    /// <summary>
+    /// BG-X-36 invoicee, EXTENDED only. Decision D-06 (proposal, open): written only when the buyer is the sell-to customer
+    /// and the bill-to customer is a different one, so that the invoice recipient is not lost. BR-FXEXT-03: only the VAT ID.
+    /// </summary>
+    local procedure InsertInvoiceeTradeParty(var SettlementElement: XmlElement; SellToCustomerNo: Code[20]; BillToCustomerNo: Code[20]; Name: Text; Address: Text; Address2: Text; PostCode: Text; City: Text; CountryRegionCode: Code[10]; County: Text)
+    var
+        Customer: Record Customer;
+        InvoiceePartyElement, SpecifiedTaxRegistrationElement : XmlElement;
+    begin
+        if not UseSellToAsBuyer() then
+            exit;
+        if (BillToCustomerNo = '') or (BillToCustomerNo = SellToCustomerNo) then
+            exit;
+        Customer.SetLoadFields("Use GLN in Electronic Document", GLN, "VAT Registration No.", "Country/Region Code");
+        if not Customer.Get(BillToCustomerNo) then
+            Clear(Customer);
+        InvoiceePartyElement := XmlElement.Create('InvoiceeTradeParty', XmlNamespaceRAM);
+        if Customer."Use GLN in Electronic Document" and (Customer.GLN <> '') then
+            InvoiceePartyElement.Add(XmlElement.Create('GlobalID', XmlNamespaceRAM, XmlAttribute.Create('schemeID', GLNSchemeIDTok), Customer.GLN));
+        AddElementIfNotEmpty(InvoiceePartyElement, 'Name', Name);
+        InvoiceePartyElement.Add(CreatePostalTradeAddressElement(PostCode, Address, Address2, City, GetCountryRegionCode(CountryRegionCode), County));
+        if Customer."VAT Registration No." <> '' then begin
+            SpecifiedTaxRegistrationElement := XmlElement.Create('SpecifiedTaxRegistration', XmlNamespaceRAM);
+            SpecifiedTaxRegistrationElement.Add(XmlElement.Create('ID', XmlNamespaceRAM, XmlAttribute.Create('schemeID', 'VA'), GetVATRegistrationNo(Customer."VAT Registration No.", GetCountryRegionCode(Customer."Country/Region Code"))));
+            InvoiceePartyElement.Add(SpecifiedTaxRegistrationElement);
+        end;
+        SettlementElement.Add(InvoiceePartyElement);
     end;
 
     local procedure InsertDeliveryGLN(var ShipToPartyElement: XmlElement; CustomerNo: Code[20]; ShipToCode: Code[10])
@@ -877,7 +1001,7 @@ codeunit 13917 "Export ZUGFeRD Document"
             ShipToPartyElement.Add(XmlElement.Create('GlobalID', XmlNamespaceRAM, XmlAttribute.Create('schemeID', GLNSchemeIDTok), DeliveryGLN));
     end;
 
-    local procedure InsertApplicableHeaderTradeSettlement(var RootXMLNode: XmlElement; var SalesInvHeader: Record "Sales Invoice Header"; var SalesInvLine: Record "Sales Invoice Line"; CurrencyCode: Code[10]; var LineAmount: Dictionary of [Decimal, Decimal]; var LineVATAmount: Dictionary of [Decimal, Decimal]; var LineAmounts: Dictionary of [Text, Decimal]; var LineDiscAmount: Dictionary of [Decimal, Decimal])
+    local procedure InsertApplicableHeaderTradeSettlement(var RootXMLNode: XmlElement; var SalesInvHeader: Record "Sales Invoice Header"; var SalesInvLine: Record "Sales Invoice Line"; CurrencyCode: Code[10]; var LineAmounts: Dictionary of [Text, Decimal]; var LineDiscAmount: Dictionary of [Decimal, Decimal])
     var
         SettlementElement, MonetarySummationElement : XmlElement;
         ItemChargeTotalAmount: Decimal;
@@ -888,14 +1012,20 @@ codeunit 13917 "Export ZUGFeRD Document"
         // BT-90 Bank assigned creditor identifier. The CII HeaderTradeSettlement sequence puts
         // CreditorReferenceID before InvoiceCurrencyCode, so it is added first.
         InsertCreditorReference(SettlementElement, SalesInvHeader."Payment Method Code", SalesInvHeader."Company Bank Account Code");
+        InsertPaymentReference(SettlementElement, SalesInvHeader."Payment Reference", SalesInvHeader."No.");
 
         SettlementElement.Add(XmlElement.Create('InvoiceCurrencyCode', XmlNamespaceRAM, CurrencyCode));
+        InsertInvoiceeTradeParty(SettlementElement, SalesInvHeader."Sell-to Customer No.", SalesInvHeader."Bill-to Customer No.", SalesInvHeader."Bill-to Name",
+            SalesInvHeader."Bill-to Address", SalesInvHeader."Bill-to Address 2", SalesInvHeader."Bill-to Post Code", SalesInvHeader."Bill-to City",
+            SalesInvHeader."Bill-to Country/Region Code", SalesInvHeader."Bill-to County");
         InsertPaymentMethod(SettlementElement, SalesInvHeader."Payment Method Code", SalesInvHeader."Company Bank Account Code", SalesInvHeader."Direct Debit Mandate ID", SalesInvHeader);
-        InsertTradeTax(SettlementElement, SalesInvLine, LineAmount, LineVATAmount);
+        InsertTradeTax(SettlementElement, SalesInvLine);
         InsertInvDiscountAllowanceCharge(SettlementElement, SalesInvLine, LineDiscAmount, LineAmounts);
         InsertItemChargeAllowanceCharges(SettlementElement, SalesInvLine);
 
-        InsertPaymentTerms(SettlementElement, SalesInvHeader."Payment Terms Code", SalesInvHeader."Due Date", GetDirectDebitMandateID(SalesInvHeader."Payment Method Code", SalesInvHeader."Direct Debit Mandate ID"));
+        InsertPaymentTerms(SettlementElement, SalesInvHeader."Payment Terms Code", SalesInvHeader."Due Date", GetDirectDebitMandateID(SalesInvHeader."Payment Method Code", SalesInvHeader."Direct Debit Mandate ID"),
+            SalesInvHeader."Document Date", SalesInvHeader."Pmt. Discount Date", SalesInvHeader."Payment Discount %", GetPaymentDiscountBasis(LineAmounts, SalesInvLine.FieldName(Amount), SalesInvLine.FieldName("Amount Including VAT")),
+            GetPaymentDiscountAmount("Gen. Journal Document Type"::Invoice, SalesInvHeader."No.", SalesInvHeader."Bill-to Customer No."), SalesInvHeader."Currency Code");
         GetDocumentLevelItemChargeTotals(SalesInvLine, ItemChargeTotalAmount, ItemChargeAllowanceTotalAmount);
         MonetarySummationElement := XmlElement.Create('SpecifiedTradeSettlementHeaderMonetarySummation', XmlNamespaceRAM);
         MonetarySummationElement.Add(XmlElement.Create('LineTotalAmount', XmlNamespaceRAM, FormatDecimal(LineAmounts.Get(SalesInvLine.FieldName(Amount)) + LineAmounts.Get(SalesInvLine.FieldName("Inv. Discount Amount")) - ItemChargeTotalAmount + ItemChargeAllowanceTotalAmount)));
@@ -913,7 +1043,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         RootXMLNode.Add(SettlementElement);
     end;
 
-    local procedure InsertApplicableHeaderTradeSettlement(var RootXMLNode: XmlElement; var SalesCrMemoHeader: Record "Sales Cr.Memo Header"; var SalesCrMemoLine: Record "Sales Cr.Memo Line"; CurrencyCode: Code[10]; var LineAmount: Dictionary of [Decimal, Decimal]; var LineVATAmount: Dictionary of [Decimal, Decimal]; var LineAmounts: Dictionary of [Text, Decimal]; var LineDiscAmount: Dictionary of [Decimal, Decimal])
+    local procedure InsertApplicableHeaderTradeSettlement(var RootXMLNode: XmlElement; var SalesCrMemoHeader: Record "Sales Cr.Memo Header"; var SalesCrMemoLine: Record "Sales Cr.Memo Line"; CurrencyCode: Code[10]; var LineAmounts: Dictionary of [Text, Decimal]; var LineDiscAmount: Dictionary of [Decimal, Decimal])
     var
         SettlementElement, MonetarySummationElement : XmlElement;
         ItemChargeTotalAmount: Decimal;
@@ -923,12 +1053,17 @@ codeunit 13917 "Export ZUGFeRD Document"
         SettlementElement := XmlElement.Create('ApplicableHeaderTradeSettlement', XmlNamespaceRAM);
 
         SettlementElement.Add(XmlElement.Create('InvoiceCurrencyCode', XmlNamespaceRAM, CurrencyCode));
+        InsertInvoiceeTradeParty(SettlementElement, SalesCrMemoHeader."Sell-to Customer No.", SalesCrMemoHeader."Bill-to Customer No.", SalesCrMemoHeader."Bill-to Name",
+            SalesCrMemoHeader."Bill-to Address", SalesCrMemoHeader."Bill-to Address 2", SalesCrMemoHeader."Bill-to Post Code", SalesCrMemoHeader."Bill-to City",
+            SalesCrMemoHeader."Bill-to Country/Region Code", SalesCrMemoHeader."Bill-to County");
         InsertPaymentMethod(SettlementElement, SalesCrMemoHeader."Payment Method Code", SalesCrMemoHeader."Company Bank Account Code", '', SalesCrMemoHeader);
-        InsertTradeTax(SettlementElement, SalesCrMemoLine, LineAmount, LineVATAmount);
+        InsertTradeTax(SettlementElement, SalesCrMemoLine);
         InsertInvDiscountAllowanceCharge(SettlementElement, SalesCrMemoLine, LineDiscAmount, LineAmounts);
         InsertItemChargeAllowanceCharges(SettlementElement, SalesCrMemoLine);
 
-        InsertPaymentTerms(SettlementElement, SalesCrMemoHeader."Payment Terms Code", SalesCrMemoHeader."Due Date", '');
+        InsertPaymentTerms(SettlementElement, SalesCrMemoHeader."Payment Terms Code", SalesCrMemoHeader."Due Date", '',
+            SalesCrMemoHeader."Document Date", SalesCrMemoHeader."Pmt. Discount Date", SalesCrMemoHeader."Payment Discount %", GetPaymentDiscountBasis(LineAmounts, SalesCrMemoLine.FieldName(Amount), SalesCrMemoLine.FieldName("Amount Including VAT")),
+            GetPaymentDiscountAmount("Gen. Journal Document Type"::"Credit Memo", SalesCrMemoHeader."No.", SalesCrMemoHeader."Bill-to Customer No."), SalesCrMemoHeader."Currency Code");
         GetDocumentLevelItemChargeTotals(SalesCrMemoLine, ItemChargeTotalAmount, ItemChargeAllowanceTotalAmount);
         MonetarySummationElement := XmlElement.Create('SpecifiedTradeSettlementHeaderMonetarySummation', XmlNamespaceRAM);
         MonetarySummationElement.Add(XmlElement.Create('LineTotalAmount', XmlNamespaceRAM, FormatDecimal(LineAmounts.Get(SalesCrMemoLine.FieldName(Amount)) + LineAmounts.Get(SalesCrMemoLine.FieldName("Inv. Discount Amount")) - ItemChargeTotalAmount + ItemChargeAllowanceTotalAmount)));
@@ -969,68 +1104,93 @@ codeunit 13917 "Export ZUGFeRD Document"
         BuyerTradePartyElement.Add(ContactElement);
     end;
 
-    local procedure InsertTradeTax(var SettlementElement: XmlElement; var SalesInvLine: Record "Sales Invoice Line"; var LineAmount: Dictionary of [Decimal, Decimal]; var LineVATAmount: Dictionary of [Decimal, Decimal])
+    /// <summary>
+    /// VAT breakdown (BG-23). Decision D-15: one breakdown per VAT category, rate and exemption reason, not per rate only,
+    /// so that e.g. E 0 % and Z 0 % are not merged (BR-E-08, BR-Z-08). The amounts are summed from the lines, as
+    /// InsertVATAmounts does for LineAmount / LineVATAmount.
+    /// </summary>
+    local procedure InsertTradeTax(var SettlementElement: XmlElement; var SalesInvLine: Record "Sales Invoice Line")
     begin
+        ClearVATBreakdown();
         if SalesInvLine.FindSet() then
             repeat
-                InsertTradeTaxForLine(SettlementElement, SalesInvLine, LineAmount, LineVATAmount);
+                AddToVATBreakdown(SalesInvLine."Tax Category", SalesInvLine."VAT Bus. Posting Group", SalesInvLine."VAT Prod. Posting Group", SalesInvLine."VAT %", SalesInvLine.Amount, SalesInvLine."Amount Including VAT" - SalesInvLine.Amount);
             until SalesInvLine.Next() = 0;
-        // Additional lines run last, so that a VAT rate that only an additional line has still gets its breakdown.
         TempAdditionalSalesInvLine.Reset();
         if TempAdditionalSalesInvLine.FindSet() then
             repeat
-                InsertTradeTaxForLine(SettlementElement, TempAdditionalSalesInvLine, LineAmount, LineVATAmount);
+                AddToVATBreakdown(TempAdditionalSalesInvLine."Tax Category", TempAdditionalSalesInvLine."VAT Bus. Posting Group", TempAdditionalSalesInvLine."VAT Prod. Posting Group", TempAdditionalSalesInvLine."VAT %", TempAdditionalSalesInvLine.Amount, TempAdditionalSalesInvLine."Amount Including VAT" - TempAdditionalSalesInvLine.Amount);
             until TempAdditionalSalesInvLine.Next() = 0;
+        InsertVATBreakdown(SettlementElement);
 
         SalesInvLine.SetRange("VAT %");
         SalesInvLine.SetRange("VAT Calculation Type");
     end;
 
-    local procedure InsertTradeTaxForLine(var SettlementElement: XmlElement; SalesInvLine: Record "Sales Invoice Line"; var LineAmount: Dictionary of [Decimal, Decimal]; var LineVATAmount: Dictionary of [Decimal, Decimal])
-    var
-        VATEXCode: Text;
-        VATClauseDescription: Text;
+    local procedure InsertTradeTax(var SettlementElement: XmlElement; var SalesCrMemoLine: Record "Sales Cr.Memo Line")
     begin
-        if not (LineVATAmount.ContainsKey(SalesInvLine."VAT %") and LineAmount.ContainsKey(SalesInvLine."VAT %")) then
-            exit;
-        PeppolVATHelper.GetVATClauseInfo(SalesInvLine."VAT Bus. Posting Group", SalesInvLine."VAT Prod. Posting Group", DocumentLanguageCode, VATEXCode, VATClauseDescription);
-        InsertTaxElement(SettlementElement, FormatDecimal(LineVATAmount.Get(SalesInvLine."VAT %")), FormatDecimal(LineAmount.Get(SalesInvLine."VAT %")),
-            GetTaxCategoryID(SalesInvLine."Tax Category", SalesInvLine."VAT Bus. Posting Group", SalesInvLine."VAT Prod. Posting Group"), FormatFiveDecimal(SalesInvLine."VAT %"),
-            VATEXCode, VATClauseDescription);
-        LineAmount.Remove(SalesInvLine."VAT %");
-        LineVATAmount.Remove(SalesInvLine."VAT %");
-    end;
-
-    local procedure InsertTradeTax(var SettlementElement: XmlElement; var SalesCrMemoLine: Record "Sales Cr.Memo Line"; var LineAmount: Dictionary of [Decimal, Decimal]; var LineVATAmount: Dictionary of [Decimal, Decimal])
-    begin
+        ClearVATBreakdown();
         if SalesCrMemoLine.FindSet() then
             repeat
-                InsertTradeTaxForLine(SettlementElement, SalesCrMemoLine, LineAmount, LineVATAmount);
+                AddToVATBreakdown(SalesCrMemoLine."Tax Category", SalesCrMemoLine."VAT Bus. Posting Group", SalesCrMemoLine."VAT Prod. Posting Group", SalesCrMemoLine."VAT %", SalesCrMemoLine.Amount, SalesCrMemoLine."Amount Including VAT" - SalesCrMemoLine.Amount);
             until SalesCrMemoLine.Next() = 0;
-        // Additional lines run last, so that a VAT rate that only an additional line has still gets its breakdown.
         TempAdditionalSalesCrMemoLine.Reset();
         if TempAdditionalSalesCrMemoLine.FindSet() then
             repeat
-                InsertTradeTaxForLine(SettlementElement, TempAdditionalSalesCrMemoLine, LineAmount, LineVATAmount);
+                AddToVATBreakdown(TempAdditionalSalesCrMemoLine."Tax Category", TempAdditionalSalesCrMemoLine."VAT Bus. Posting Group", TempAdditionalSalesCrMemoLine."VAT Prod. Posting Group", TempAdditionalSalesCrMemoLine."VAT %", TempAdditionalSalesCrMemoLine.Amount, TempAdditionalSalesCrMemoLine."Amount Including VAT" - TempAdditionalSalesCrMemoLine.Amount);
             until TempAdditionalSalesCrMemoLine.Next() = 0;
+        InsertVATBreakdown(SettlementElement);
 
         SalesCrMemoLine.SetRange("VAT %");
         SalesCrMemoLine.SetRange("VAT Calculation Type");
     end;
 
-    local procedure InsertTradeTaxForLine(var SettlementElement: XmlElement; SalesCrMemoLine: Record "Sales Cr.Memo Line"; var LineAmount: Dictionary of [Decimal, Decimal]; var LineVATAmount: Dictionary of [Decimal, Decimal])
+    local procedure ClearVATBreakdown()
+    begin
+        Clear(VATBreakdownKeys);
+        Clear(VATBreakdownBasisAmounts);
+        Clear(VATBreakdownVATAmounts);
+        Clear(VATBreakdownCategories);
+        Clear(VATBreakdownRates);
+        Clear(VATBreakdownBusPostingGroups);
+        Clear(VATBreakdownProdPostingGroups);
+    end;
+
+    local procedure AddToVATBreakdown(TaxCategory: Code[10]; VATBusPostingGroup: Code[20]; VATProdPostingGroup: Code[20]; VATPercent: Decimal; BasisAmount: Decimal; VATAmount: Decimal)
     var
+        CategoryID: Text;
+        VATEXCode: Text;
+        VATClauseDescription: Text;
+        BreakdownKey: Text;
+    begin
+        CategoryID := GetTaxCategoryID(TaxCategory, VATBusPostingGroup, VATProdPostingGroup);
+        PeppolVATHelper.GetVATClauseInfo(VATBusPostingGroup, VATProdPostingGroup, DocumentLanguageCode, VATEXCode, VATClauseDescription);
+        BreakdownKey := CategoryID + '|' + FormatFiveDecimal(VATPercent) + '|' + VATEXCode;
+        if not VATBreakdownKeys.Contains(BreakdownKey) then begin
+            VATBreakdownKeys.Add(BreakdownKey);
+            VATBreakdownBasisAmounts.Add(BreakdownKey, 0);
+            VATBreakdownVATAmounts.Add(BreakdownKey, 0);
+            VATBreakdownCategories.Add(BreakdownKey, CategoryID);
+            VATBreakdownRates.Add(BreakdownKey, VATPercent);
+            // The VAT clause of the first line of the group gives the exemption reason text.
+            VATBreakdownBusPostingGroups.Add(BreakdownKey, VATBusPostingGroup);
+            VATBreakdownProdPostingGroups.Add(BreakdownKey, VATProdPostingGroup);
+        end;
+        VATBreakdownBasisAmounts.Set(BreakdownKey, VATBreakdownBasisAmounts.Get(BreakdownKey) + BasisAmount);
+        VATBreakdownVATAmounts.Set(BreakdownKey, VATBreakdownVATAmounts.Get(BreakdownKey) + VATAmount);
+    end;
+
+    local procedure InsertVATBreakdown(var SettlementElement: XmlElement)
+    var
+        BreakdownKey: Text;
         VATEXCode: Text;
         VATClauseDescription: Text;
     begin
-        if not (LineVATAmount.ContainsKey(SalesCrMemoLine."VAT %") and LineAmount.ContainsKey(SalesCrMemoLine."VAT %")) then
-            exit;
-        PeppolVATHelper.GetVATClauseInfo(SalesCrMemoLine."VAT Bus. Posting Group", SalesCrMemoLine."VAT Prod. Posting Group", DocumentLanguageCode, VATEXCode, VATClauseDescription);
-        InsertTaxElement(SettlementElement, FormatDecimal(LineVATAmount.Get(SalesCrMemoLine."VAT %")), FormatDecimal(LineAmount.Get(SalesCrMemoLine."VAT %")),
-            GetTaxCategoryID(SalesCrMemoLine."Tax Category", SalesCrMemoLine."VAT Bus. Posting Group", SalesCrMemoLine."VAT Prod. Posting Group"), FormatFiveDecimal(SalesCrMemoLine."VAT %"),
-            VATEXCode, VATClauseDescription);
-        LineAmount.Remove(SalesCrMemoLine."VAT %");
-        LineVATAmount.Remove(SalesCrMemoLine."VAT %");
+        foreach BreakdownKey in VATBreakdownKeys do begin
+            PeppolVATHelper.GetVATClauseInfo(VATBreakdownBusPostingGroups.Get(BreakdownKey), VATBreakdownProdPostingGroups.Get(BreakdownKey), DocumentLanguageCode, VATEXCode, VATClauseDescription);
+            InsertTaxElement(SettlementElement, FormatDecimal(VATBreakdownVATAmounts.Get(BreakdownKey)), FormatDecimal(VATBreakdownBasisAmounts.Get(BreakdownKey)),
+                VATBreakdownCategories.Get(BreakdownKey), FormatFiveDecimal(VATBreakdownRates.Get(BreakdownKey)), VATEXCode, VATClauseDescription);
+        end;
     end;
 
     local procedure InsertTaxElement(var SettlementElement: XmlElement; CalculatedAmount: Text; BasisAmount: Text; CategoryCode: Text; RateApplicablePercent: Text; VATEXCode: Text; VATClauseDescription: Text)
@@ -1078,7 +1238,7 @@ codeunit 13917 "Export ZUGFeRD Document"
             until TempAdditionalSalesInvLine.Next() = 0;
         InsertApplicableHeaderTradeAgreement(SupplyChainTradeTransactionElement, SalesInvoiceHeader);
         InsertApplicableHeaderTradeDelivery(SupplyChainTradeTransactionElement, SalesInvoiceHeader);
-        InsertApplicableHeaderTradeSettlement(SupplyChainTradeTransactionElement, SalesInvoiceHeader, SalesInvoiceLine, CurrencyCode, LineAmount, LineVATAmount, LineAmounts, LineDiscAmount);
+        InsertApplicableHeaderTradeSettlement(SupplyChainTradeTransactionElement, SalesInvoiceHeader, SalesInvoiceLine, CurrencyCode, LineAmounts, LineDiscAmount);
 
         RootXMLNode.Add(SupplyChainTradeTransactionElement);
     end;
@@ -1215,7 +1375,7 @@ codeunit 13917 "Export ZUGFeRD Document"
             until TempAdditionalSalesCrMemoLine.Next() = 0;
         InsertApplicableHeaderTradeAgreement(SupplyChainTradeTransactionElement, SalesCrMemoHeader);
         InsertApplicableHeaderTradeDelivery(SupplyChainTradeTransactionElement, SalesCrMemoHeader);
-        InsertApplicableHeaderTradeSettlement(SupplyChainTradeTransactionElement, SalesCrMemoHeader, SalesCrMemoLine, CurrencyCode, LineAmount, LineVATAmount, LineAmounts, LineDiscAmount);
+        InsertApplicableHeaderTradeSettlement(SupplyChainTradeTransactionElement, SalesCrMemoHeader, SalesCrMemoLine, CurrencyCode, LineAmounts, LineDiscAmount);
 
         RootXMLNode.Add(SupplyChainTradeTransactionElement);
     end;
@@ -1314,7 +1474,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         exit('');
     end;
 
-    local procedure InsertPaymentTerms(var RootXMLNode: XmlElement; PaymentTermsCode: Code[10]; DueDate: Date; DirectDebitMandateID: Code[35])
+    local procedure InsertPaymentTerms(var RootXMLNode: XmlElement; PaymentTermsCode: Code[10]; DueDate: Date; DirectDebitMandateID: Code[35]; DocumentDate: Date; PmtDiscountDate: Date; PaymentDiscountPercent: Decimal; DiscountBasisAmount: Decimal; DiscountAmount: Decimal; DocumentCurrencyCode: Code[10])
     var
         PaymentTerms: Record "Payment Terms";
         PaymentTermsElement: XmlElement;
@@ -1323,19 +1483,94 @@ codeunit 13917 "Export ZUGFeRD Document"
     begin
         PaymentTermsElement := XmlElement.Create('SpecifiedTradePaymentTerms', XmlNamespaceRAM);
         if PaymentTermsCode <> '' then
-            if PaymentTerms.Get(PaymentTermsCode) then begin
+            if PaymentTerms.Get(PaymentTermsCode) and (PaymentTerms.Description <> '') then begin
                 PaymentTermsDescriptionElement := XmlElement.Create('Description', XmlNamespaceRAM, PaymentTerms.Description);
                 PaymentTermsElement.Add(PaymentTermsDescriptionElement);
             end;
 
-        DueDateElement := XmlElement.Create('DueDateDateTime', XmlNamespaceRAM);
-        DueDateElement.Add(XmlElement.Create('DateTimeString', XmlNamespaceUDT, XmlAttribute.Create('format', '102'), FormatDate(DueDate)));
-        PaymentTermsElement.Add(DueDateElement);
+        // CII R74: without a due date no DueDateDateTime, instead of the placeholder 17530101.
+        if DueDate <> 0D then begin
+            DueDateElement := XmlElement.Create('DueDateDateTime', XmlNamespaceRAM);
+            DueDateElement.Add(XmlElement.Create('DateTimeString', XmlNamespaceUDT, XmlAttribute.Create('format', '102'), FormatDate(DueDate)));
+            PaymentTermsElement.Add(DueDateElement);
+        end;
         // BT-89 Mandate reference identifier. The CII TradePaymentTerms sequence puts DirectDebitMandateID
         // after DueDateDateTime, so it is added last.
         if DirectDebitMandateID <> '' then
             PaymentTermsElement.Add(XmlElement.Create('DirectDebitMandateID', XmlNamespaceRAM, DirectDebitMandateID));
+        InsertPaymentDiscountTerms(PaymentTermsElement, DocumentDate, PmtDiscountDate, PaymentDiscountPercent, DiscountBasisAmount, DiscountAmount, DocumentCurrencyCode);
+
+        if PaymentTermsElement.GetChildElements().Count() = 0 then
+            exit;
         RootXMLNode.Add(PaymentTermsElement);
+    end;
+
+    /// <summary>
+    /// Payment discount (Skonto), BT-X-282..BT-X-287, EXTENDED only. EN 16931 and XRechnung have no structured discount;
+    /// the KoSIT text convention #SKONTO# for BT-20 is decision D-18 and not written here.
+    /// </summary>
+    local procedure InsertPaymentDiscountTerms(var PaymentTermsElement: XmlElement; DocumentDate: Date; PmtDiscountDate: Date; PaymentDiscountPercent: Decimal; DiscountBasisAmount: Decimal; DiscountAmount: Decimal; DocumentCurrencyCode: Code[10])
+    var
+        Currency: Record Currency;
+        DiscountTermsElement: XmlElement;
+        BasisDateElement: XmlElement;
+    begin
+        if CurrentZUGFeRDProfile <> CurrentZUGFeRDProfile::Extended then
+            exit;
+        if (PaymentDiscountPercent = 0) or (PmtDiscountDate = 0D) then
+            exit;
+        if DiscountAmount = 0 then begin
+            Currency.Initialize(DocumentCurrencyCode);
+            DiscountAmount := Round(DiscountBasisAmount * PaymentDiscountPercent / 100, Currency."Amount Rounding Precision");
+        end;
+
+        DiscountTermsElement := XmlElement.Create('ApplicableTradePaymentDiscountTerms', XmlNamespaceRAM);
+        if DocumentDate <> 0D then begin
+            // BT-X-282 basis date and BT-X-283 period: the discount applies until basis date + period.
+            BasisDateElement := XmlElement.Create('BasisDateTime', XmlNamespaceRAM);
+            BasisDateElement.Add(XmlElement.Create('DateTimeString', XmlNamespaceUDT, XmlAttribute.Create('format', '102'), FormatDate(DocumentDate)));
+            DiscountTermsElement.Add(BasisDateElement);
+            DiscountTermsElement.Add(XmlElement.Create('BasisPeriodMeasure', XmlNamespaceRAM, XmlAttribute.Create('unitCode', 'DAY'), Format(PmtDiscountDate - DocumentDate)));
+        end;
+        DiscountTermsElement.Add(XmlElement.Create('BasisAmount', XmlNamespaceRAM, FormatDecimal(DiscountBasisAmount)));
+        DiscountTermsElement.Add(XmlElement.Create('CalculationPercent', XmlNamespaceRAM, FormatFiveDecimal(PaymentDiscountPercent)));
+        DiscountTermsElement.Add(XmlElement.Create('ActualDiscountAmount', XmlNamespaceRAM, FormatDecimal(Abs(DiscountAmount))));
+        PaymentTermsElement.Add(DiscountTermsElement);
+    end;
+
+    local procedure GetPaymentDiscountBasis(var LineAmounts: Dictionary of [Text, Decimal]; AmountKey: Text; AmountIncludingVATKey: Text): Decimal
+    begin
+        // The discount base follows G/L Setup "Pmt. Disc. Excl. VAT", as in the posting.
+        if GeneralLedgerSetup."Pmt. Disc. Excl. VAT" then
+            exit(LineAmounts.Get(AmountKey));
+        exit(LineAmounts.Get(AmountIncludingVATKey));
+    end;
+
+    local procedure GetPaymentDiscountAmount(DocumentType: Enum "Gen. Journal Document Type"; DocumentNo: Code[20]; CustomerNo: Code[20]): Decimal
+    var
+        CustLedgerEntry: Record "Cust. Ledger Entry";
+    begin
+        // The discount as posted. Without a ledger entry (e.g. a plain print before posting) it is calculated from base and percentage.
+        CustLedgerEntry.SetLoadFields("Original Pmt. Disc. Possible");
+        CustLedgerEntry.SetRange("Document Type", DocumentType);
+        CustLedgerEntry.SetRange("Document No.", DocumentNo);
+        CustLedgerEntry.SetRange("Customer No.", CustomerNo);
+        if CustLedgerEntry.FindFirst() then
+            exit(CustLedgerEntry."Original Pmt. Disc. Possible");
+        exit(0);
+    end;
+
+    /// <summary>
+    /// BT-83 remittance information, EXTENDED only: the payment reference of the invoice, or the invoice number.
+    /// </summary>
+    local procedure InsertPaymentReference(var SettlementElement: XmlElement; PaymentReference: Code[50]; DocumentNo: Code[20])
+    begin
+        if CurrentZUGFeRDProfile <> CurrentZUGFeRDProfile::Extended then
+            exit;
+        if PaymentReference <> '' then
+            SettlementElement.Add(XmlElement.Create('PaymentReference', XmlNamespaceRAM, PaymentReference))
+        else
+            AddElementIfNotEmpty(SettlementElement, 'PaymentReference', DocumentNo);
     end;
 
     local procedure InsertPaymentMethod(var RootXMLNode: XmlElement; PaymentMethodCode: Code[10]; CompanyBankAccountCode: Code[20]; DirectDebitMandateID: Code[35]; RecordVariant: Variant)
@@ -1349,6 +1584,7 @@ codeunit 13917 "Export ZUGFeRD Document"
         PaymentMethodElement := XmlElement.Create('SpecifiedTradeSettlementPaymentMeans', XmlNamespaceRAM);
         PaymentMethodTypeCodeElement := XmlElement.Create('TypeCode', XmlNamespaceRAM, PaymentMeansCode);
         PaymentMethodElement.Add(PaymentMethodTypeCodeElement);
+        InsertPaymentMeansInformation(PaymentMethodElement, PaymentMethodCode);
 
         case PaymentMeansCode of
             '30', '58':
@@ -1386,19 +1622,39 @@ codeunit 13917 "Export ZUGFeRD Document"
         end;
     end;
 
+    /// <summary>
+    /// BT-82 payment means text, EXTENDED only: the description of the payment method.
+    /// </summary>
+    local procedure InsertPaymentMeansInformation(var PaymentMethodElement: XmlElement; PaymentMethodCode: Code[10])
+    var
+        PaymentMethod: Record "Payment Method";
+    begin
+        if CurrentZUGFeRDProfile <> CurrentZUGFeRDProfile::Extended then
+            exit;
+        if PaymentMethodCode = '' then
+            exit;
+        PaymentMethod.SetLoadFields(Description);
+        if PaymentMethod.Get(PaymentMethodCode) then
+            AddElementIfNotEmpty(PaymentMethodElement, 'Information', PaymentMethod.Description);
+    end;
+
     local procedure InsertCreditTransferPayment(var PaymentMethodElement: XmlElement; CompanyBankAccountCode: Code[20])
     var
         IBAN: Text[50];
         SWIFTCode: Code[20];
+        AccountName: Text[100];
     begin
         // PayeePartyCreditorFinancialAccount = company bank account (payment recipient), for invoices and credit memos alike.
         // Customer bank data is intentionally not used as payee here, even though a customer IBAN/BIC could technically be read
-        GetBankAccountPaymentDetails(CompanyBankAccountCode, IBAN, SWIFTCode);
-        AddCreditorAccount(PaymentMethodElement, IBAN);
+        GetBankAccountPaymentDetails(CompanyBankAccountCode, IBAN, SWIFTCode, AccountName);
+        // BT-85 account name, EXTENDED only.
+        if CurrentZUGFeRDProfile <> CurrentZUGFeRDProfile::Extended then
+            AccountName := '';
+        AddCreditorAccount(PaymentMethodElement, IBAN, AccountName);
         AddCreditorFinancialInstitution(PaymentMethodElement, SWIFTCode);
     end;
 
-    local procedure AddCreditorAccount(var PaymentMethodElement: XmlElement; IBAN: Text[50])
+    local procedure AddCreditorAccount(var PaymentMethodElement: XmlElement; IBAN: Text[50]; AccountName: Text[100])
     var
         PaymentMethodIBANElement: XmlElement;
     begin
@@ -1406,6 +1662,7 @@ codeunit 13917 "Export ZUGFeRD Document"
             exit;
         PaymentMethodIBANElement := XmlElement.Create('PayeePartyCreditorFinancialAccount', XmlNamespaceRAM);
         PaymentMethodIBANElement.Add(XmlElement.Create('IBANID', XmlNamespaceRAM, GetIBAN(IBAN)));
+        AddElementIfNotEmpty(PaymentMethodIBANElement, 'AccountName', AccountName);
         PaymentMethodElement.Add(PaymentMethodIBANElement);
     end;
 
@@ -2448,10 +2705,12 @@ codeunit 13917 "Export ZUGFeRD Document"
 #pragma warning restore AA0228, AL0432
 #endif
 
-    local procedure GetBankAccountPaymentDetails(BankAccountCode: Code[20]; var IBAN: Text[50]; var SWIFTCode: Code[20])
+    local procedure GetBankAccountPaymentDetails(BankAccountCode: Code[20]; var IBAN: Text[50]; var SWIFTCode: Code[20]; var AccountName: Text[100])
     var
         BankAccount: Record "Bank Account";
     begin
+        // BT-85 is the name of the account holder, the seller, not the bank account's own name in BC.
+        AccountName := CompanyInformation.Name;
         if BankAccountCode <> '' then
             if BankAccount.Get(BankAccountCode) then begin
                 IBAN := BankAccount.IBAN;
