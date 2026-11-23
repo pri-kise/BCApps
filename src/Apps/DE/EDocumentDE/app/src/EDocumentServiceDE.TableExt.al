@@ -37,6 +37,12 @@ tableextension 13915 "E-Document Service DE" extends "E-Document Service"
             DataClassification = SystemMetadata;
             ToolTip = 'Specifies whether the buyer reference is mandatory for the document.';
         }
+        field(13916; "ZUGFeRD Profile"; Enum "ZUGFeRD Profile")
+        {
+            Caption = 'ZUGFeRD Profile';
+            DataClassification = SystemMetadata;
+            ToolTip = 'Specifies the ZUGFeRD profile that is exported. XRechnung writes the XRechnung 3.0 profile with the embedded file xrechnung.xml. Extended writes the ZUGFeRD EXTENDED profile with the embedded file factur-x.xml.';
+        }
 #pragma warning restore AS0125
     }
 }

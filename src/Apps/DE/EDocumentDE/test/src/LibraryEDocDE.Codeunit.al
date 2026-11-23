@@ -6,10 +6,9 @@ namespace Microsoft.eServices.EDocument.Formats;
 
 using Microsoft.Bank.BankAccount;
 using Microsoft.Bank.DirectDebit;
-#if not CLEAN30
 using Microsoft.eServices.EDocument;
-#endif
 using Microsoft.Sales.Customer;
+using Microsoft.Sales.History;
 using Microsoft.Sales.Setup;
 using System.Reflection;
 
@@ -27,6 +26,17 @@ codeunit 13925 "Library - E-Doc DE"
         SEPADirectDebitMeansCodeTok: Label '59', Locked = true;
         CapturedEDocumentServiceCode: Code[20];
         EDocumentServiceEventCount: Integer;
+        ZUGFeRDSubLineScenarioEnabled: Boolean;
+        ZUGFeRDForceExtendedProfile: Boolean;
+        ZUGFeRDUsedPartAmount: Decimal;
+        ZUGFeRDAdditionalLineNo: Integer;
+        ZUGFeRDDespatchAdviceNo: Code[20];
+        ZUGFeRDLineIDPrefix: Text;
+        ZUGFeRDUsedPartNoteTxt: Label 'The invoice amount includes VAT on the value of the old part.', Locked = true;
+        ZUGFeRDRegisterNoteTxt: Label 'Managing director: Jane Doe, Register court: Musterstadt HRB 12345', Locked = true;
+        ZUGFeRDUsedPartLineTxt: Label 'Old part value', Locked = true;
+        ZUGFeRDUsedPartSubjectCodeTok: Label 'ADU', Locked = true;
+        ZUGFeRDRegisterSubjectCodeTok: Label 'REG', Locked = true;
 
     /// <summary>
     /// Resets the OnAfterFindEDocumentService capture state. Bind this codeunit with
@@ -94,6 +104,207 @@ codeunit 13925 "Library - E-Doc DE"
     local procedure CaptureZUGFeRDOnInsertPaymentMethodOnBeforeAddToRoot(var PaymentMethodElement: XmlElement; HeaderRecRef: RecordRef)
     begin
         CapturedPaymentMeansHeaderRecordId := HeaderRecRef.RecordId();
+    end;
+
+    /// <summary>
+    /// Makes the ZUGFeRD event subscribers of this codeunit build a document like an automotive invoice: two header notes
+    /// (ADU and REG), every line except the first one as a sub-line of the first line, an additional old-part value line
+    /// that is also a sub-line of the first line, the old-part value as paid amount and a despatch advice reference.
+    /// Bind this codeunit with BindSubscription before the export and unbind afterwards.
+    /// </summary>
+    /// <param name="UsedPartAmount">The net amount of the additional old-part value line, also used as paid amount.</param>
+    /// <param name="AdditionalLineNo">The line number of the additional line.</param>
+    /// <param name="DespatchAdviceNo">The despatch advice number appended to the delivery block.</param>
+    procedure EnableZUGFeRDSubLineScenario(UsedPartAmount: Decimal; AdditionalLineNo: Integer; DespatchAdviceNo: Code[20])
+    begin
+        ZUGFeRDSubLineScenarioEnabled := true;
+        ZUGFeRDUsedPartAmount := UsedPartAmount;
+        ZUGFeRDAdditionalLineNo := AdditionalLineNo;
+        ZUGFeRDDespatchAdviceNo := DespatchAdviceNo;
+    end;
+
+    /// <summary>
+    /// Switches off all ZUGFeRD scenarios of this codeunit, so that a later bind only captures events.
+    /// </summary>
+    procedure ResetZUGFeRDScenario()
+    begin
+        Clear(ZUGFeRDSubLineScenarioEnabled);
+        Clear(ZUGFeRDForceExtendedProfile);
+        Clear(ZUGFeRDUsedPartAmount);
+        Clear(ZUGFeRDAdditionalLineNo);
+        Clear(ZUGFeRDDespatchAdviceNo);
+        Clear(ZUGFeRDLineIDPrefix);
+    end;
+
+    /// <summary>
+    /// Makes the profile resolution subscriber of this codeunit return the EXTENDED profile, whatever the service says.
+    /// </summary>
+    procedure ForceZUGFeRDExtendedProfile()
+    begin
+        ZUGFeRDForceExtendedProfile := true;
+    end;
+
+    /// <summary>
+    /// Makes the line identification subscriber of this codeunit prefix every line ID, like an own position numbering.
+    /// </summary>
+    /// <param name="LineIDPrefix">The prefix for every line ID.</param>
+    procedure SetZUGFeRDLineIDPrefix(LineIDPrefix: Text)
+    begin
+        ZUGFeRDLineIDPrefix := LineIDPrefix;
+    end;
+
+    /// <summary>
+    /// Returns the content of the ADU note that the sub-line scenario adds.
+    /// </summary>
+    /// <returns>The content of the ADU note.</returns>
+    procedure GetZUGFeRDUsedPartNote(): Text
+    begin
+        exit(ZUGFeRDUsedPartNoteTxt);
+    end;
+
+    /// <summary>
+    /// Returns the content of the REG note that the sub-line scenario adds.
+    /// </summary>
+    /// <returns>The content of the REG note.</returns>
+    procedure GetZUGFeRDRegisterNote(): Text
+    begin
+        exit(ZUGFeRDRegisterNoteTxt);
+    end;
+
+    [EventSubscriber(ObjectType::Codeunit, Codeunit::"Export ZUGFeRD Document", OnAfterResolveZUGFeRDProfile, '', false, false)]
+    local procedure ForceExtendedOnAfterResolveZUGFeRDProfile(EDocumentService: Record "E-Document Service"; HeaderRecordRef: RecordRef; var ZUGFeRDProfile: Enum "ZUGFeRD Profile")
+    begin
+        if ZUGFeRDForceExtendedProfile then
+            ZUGFeRDProfile := ZUGFeRDProfile::Extended;
+    end;
+
+    [EventSubscriber(ObjectType::Codeunit, Codeunit::"Export ZUGFeRD Document", OnCollectHeaderNotes, '', false, false)]
+    local procedure AddNotesOnCollectHeaderNotes(HeaderRecordRef: RecordRef; ZUGFeRDProfile: Enum "ZUGFeRD Profile"; var TempZUGFeRDNote: Record "ZUGFeRD Note" temporary)
+    begin
+        if not ZUGFeRDSubLineScenarioEnabled then
+            exit;
+        TempZUGFeRDNote.AddNote(ZUGFeRDUsedPartSubjectCodeTok, ZUGFeRDUsedPartNoteTxt);
+        TempZUGFeRDNote.AddNote(ZUGFeRDRegisterSubjectCodeTok, ZUGFeRDRegisterNoteTxt);
+    end;
+
+    [EventSubscriber(ObjectType::Codeunit, Codeunit::"Export ZUGFeRD Document", OnInsertLineOnBeforeCreateAssociatedDocumentLine, '', false, false)]
+    local procedure SetHierarchyOnInsertLineOnBeforeCreateAssociatedDocumentLine(LineRecordRef: RecordRef; ZUGFeRDProfile: Enum "ZUGFeRD Profile"; var LineID: Text; var ParentLineID: Text; var LineSubtype: Enum "ZUGFeRD Line Subtype")
+    var
+        SalesInvoiceLine: Record "Sales Invoice Line";
+        LineNo: Integer;
+        FirstLineNo: Integer;
+    begin
+        if ZUGFeRDLineIDPrefix <> '' then
+            LineID := ZUGFeRDLineIDPrefix + LineID;
+        if not ZUGFeRDSubLineScenarioEnabled then
+            exit;
+        // "Line No." has the same field number on Sales Invoice Line and Sales Cr.Memo Line.
+        LineNo := LineRecordRef.Field(SalesInvoiceLine.FieldNo("Line No.")).Value();
+        FirstLineNo := GetFirstDocumentLineNo(LineRecordRef);
+        if LineNo = FirstLineNo then
+            exit;
+        ParentLineID := ZUGFeRDLineIDPrefix + Format(FirstLineNo);
+        if LineNo = ZUGFeRDAdditionalLineNo then
+            LineSubtype := LineSubtype::Detail;
+    end;
+
+    [EventSubscriber(ObjectType::Codeunit, Codeunit::"Export ZUGFeRD Document", OnCollectAdditionalInvoiceLines, '', false, false)]
+    local procedure AddUsedPartLineOnCollectAdditionalInvoiceLines(HeaderRecordRef: RecordRef; ZUGFeRDProfile: Enum "ZUGFeRD Profile"; var TempAdditionalSalesInvLine: Record "Sales Invoice Line" temporary)
+    var
+        SalesInvoiceHeader: Record "Sales Invoice Header";
+        SalesInvoiceLine: Record "Sales Invoice Line";
+    begin
+        if not ZUGFeRDSubLineScenarioEnabled then
+            exit;
+        HeaderRecordRef.SetTable(SalesInvoiceHeader);
+        SalesInvoiceLine.SetRange("Document No.", SalesInvoiceHeader."No.");
+        SalesInvoiceLine.SetFilter(Type, '<>%1', SalesInvoiceLine.Type::" ");
+        SalesInvoiceLine.FindFirst();
+        TempAdditionalSalesInvLine := SalesInvoiceLine;
+        TempAdditionalSalesInvLine."Line No." := ZUGFeRDAdditionalLineNo;
+        TempAdditionalSalesInvLine.Description := ZUGFeRDUsedPartLineTxt;
+        TempAdditionalSalesInvLine."Item Reference No." := '';
+        TempAdditionalSalesInvLine.Quantity := 1;
+        TempAdditionalSalesInvLine."Unit Price" := ZUGFeRDUsedPartAmount;
+        TempAdditionalSalesInvLine."Line Discount %" := 0;
+        TempAdditionalSalesInvLine."Line Discount Amount" := 0;
+        TempAdditionalSalesInvLine."Inv. Discount Amount" := 0;
+        TempAdditionalSalesInvLine.Amount := ZUGFeRDUsedPartAmount;
+        TempAdditionalSalesInvLine."Amount Including VAT" := GetUsedPartAmountIncludingVAT(SalesInvoiceLine."VAT %");
+        TempAdditionalSalesInvLine.Insert();
+    end;
+
+    [EventSubscriber(ObjectType::Codeunit, Codeunit::"Export ZUGFeRD Document", OnCollectAdditionalCrMemoLines, '', false, false)]
+    local procedure AddUsedPartLineOnCollectAdditionalCrMemoLines(HeaderRecordRef: RecordRef; ZUGFeRDProfile: Enum "ZUGFeRD Profile"; var TempAdditionalSalesCrMemoLine: Record "Sales Cr.Memo Line" temporary)
+    var
+        SalesCrMemoHeader: Record "Sales Cr.Memo Header";
+        SalesCrMemoLine: Record "Sales Cr.Memo Line";
+    begin
+        if not ZUGFeRDSubLineScenarioEnabled then
+            exit;
+        HeaderRecordRef.SetTable(SalesCrMemoHeader);
+        SalesCrMemoLine.SetRange("Document No.", SalesCrMemoHeader."No.");
+        SalesCrMemoLine.FindFirst();
+        TempAdditionalSalesCrMemoLine := SalesCrMemoLine;
+        TempAdditionalSalesCrMemoLine."Line No." := ZUGFeRDAdditionalLineNo;
+        TempAdditionalSalesCrMemoLine.Description := ZUGFeRDUsedPartLineTxt;
+        TempAdditionalSalesCrMemoLine."Item Reference No." := '';
+        TempAdditionalSalesCrMemoLine.Quantity := 1;
+        TempAdditionalSalesCrMemoLine."Unit Price" := ZUGFeRDUsedPartAmount;
+        TempAdditionalSalesCrMemoLine."Line Discount %" := 0;
+        TempAdditionalSalesCrMemoLine."Line Discount Amount" := 0;
+        TempAdditionalSalesCrMemoLine."Inv. Discount Amount" := 0;
+        TempAdditionalSalesCrMemoLine.Amount := ZUGFeRDUsedPartAmount;
+        TempAdditionalSalesCrMemoLine."Amount Including VAT" := GetUsedPartAmountIncludingVAT(SalesCrMemoLine."VAT %");
+        TempAdditionalSalesCrMemoLine.Insert();
+    end;
+
+    [EventSubscriber(ObjectType::Codeunit, Codeunit::"Export ZUGFeRD Document", OnInsertMonetarySummationOnBeforeCreateElement, '', false, false)]
+    local procedure SetPrepaidAmountOnInsertMonetarySummationOnBeforeCreateElement(HeaderRecordRef: RecordRef; ZUGFeRDProfile: Enum "ZUGFeRD Profile"; var PrepaidAmount: Decimal)
+    begin
+        if ZUGFeRDSubLineScenarioEnabled then
+            PrepaidAmount := ZUGFeRDUsedPartAmount;
+    end;
+
+    [EventSubscriber(ObjectType::Codeunit, Codeunit::"Export ZUGFeRD Document", OnAfterInsertApplicableHeaderTradeDelivery, '', false, false)]
+    local procedure AddDespatchAdviceOnAfterInsertApplicableHeaderTradeDelivery(var DeliveryElement: XmlElement; HeaderRecordRef: RecordRef; ZUGFeRDProfile: Enum "ZUGFeRD Profile")
+    var
+        RAMNamespaceTok: Label 'urn:un:unece:uncefact:data:standard:ReusableAggregateBusinessInformationEntity:100', Locked = true;
+    begin
+        if not ZUGFeRDSubLineScenarioEnabled then
+            exit;
+        DeliveryElement.Add(
+            XmlElement.Create('DespatchAdviceReferencedDocument', RAMNamespaceTok,
+                XmlElement.Create('IssuerAssignedID', RAMNamespaceTok, ZUGFeRDDespatchAdviceNo)));
+    end;
+
+    /// <summary>
+    /// Returns the old-part amount including VAT at the given VAT rate, rounded like a posted line in local currency.
+    /// </summary>
+    /// <param name="VATPercent">The VAT rate.</param>
+    /// <returns>The old-part amount including VAT.</returns>
+    procedure GetUsedPartAmountIncludingVAT(VATPercent: Decimal): Decimal
+    begin
+        exit(Round(ZUGFeRDUsedPartAmount * (1 + VATPercent / 100)));
+    end;
+
+    local procedure GetFirstDocumentLineNo(LineRecordRef: RecordRef): Integer
+    var
+        SalesInvoiceLine: Record "Sales Invoice Line";
+        SalesCrMemoLine: Record "Sales Cr.Memo Line";
+        DocumentNo: Code[20];
+    begin
+        // "Document No." has the same field number on Sales Invoice Line and Sales Cr.Memo Line.
+        DocumentNo := LineRecordRef.Field(SalesInvoiceLine.FieldNo("Document No.")).Value();
+        if LineRecordRef.Number() = Database::"Sales Cr.Memo Line" then begin
+            SalesCrMemoLine.SetRange("Document No.", DocumentNo);
+            SalesCrMemoLine.FindFirst();
+            exit(SalesCrMemoLine."Line No.");
+        end;
+        SalesInvoiceLine.SetRange("Document No.", DocumentNo);
+        SalesInvoiceLine.SetFilter(Type, '<>%1', SalesInvoiceLine.Type::" ");
+        SalesInvoiceLine.FindFirst();
+        exit(SalesInvoiceLine."Line No.");
     end;
 
     /// <summary>
